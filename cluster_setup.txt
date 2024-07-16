@@ -1,0 +1,8 @@
+sudo kubeadm init --apiserver-advertise-address 192.168.60.11 --control-plane-endpoint 192.168.60.11 --upload-certs
+
+kubectl label nodes master node-role.kubernetes.io/control-plane=true --overwrite
+
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+
+kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+
