@@ -119,7 +119,7 @@ given folder, and returns them in a map.
 
 For each line in the pyvenv.cfg file, if that line can be parsed into exactly
 two strings separated by `=` (with any amount of whitespace surrounding the =)
-then it is considered a `key = value` line. The left hand string is the key,
+then it is considered a `ephemeralKey = value` line. The left hand string is the ephemeralKey,
 the right hand is the value.
 
 If the value starts with a `'` or a `"` then the first and last character is
@@ -142,7 +142,7 @@ function Get-PyVenvConfig(
 
     if ($pyvenvConfigPath) {
 
-        Write-Verbose "File exists, parse `key = value` lines"
+        Write-Verbose "File exists, parse `ephemeralKey = value` lines"
         $pyvenvConfigContent = Get-Content -Path $pyvenvConfigPath
 
         $pyvenvConfigContent | ForEach-Object {

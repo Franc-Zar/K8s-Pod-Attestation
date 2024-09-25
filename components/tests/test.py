@@ -1,13 +1,15 @@
 import requests
 import rsa
 import json
+import random
 import base64
-import pem
 
 # Define API endpoints
-BASE_URL = 'http://localhost:8080'
-CREATE_TENANT_URL = f'{BASE_URL}/tenant/create'
-VERIFY_SIGNATURE_URL = f'{BASE_URL}/tenant/verify'
+REGISTRAR_BASE_URL = 'http://localhost:8080'  # Ensure this matches your pod-handler URL
+POD_HANDLER_BASE_URL = 'http://localhost:8081'
+CREATE_TENANT_URL = f'{REGISTRAR_BASE_URL}/tenant/create'
+VERIFY_SIGNATURE_URL = f'{REGISTRAR_BASE_URL}/tenant/verify'
+POD_DEPLOYMENT_URL = f'{POD_HANDLER_BASE_URL}/pod/deploy'
 
 # Generate RSA keys (for demonstration purposes)
 (public_key, private_key) = rsa.newkeys(512)
@@ -17,10 +19,9 @@ def public_key_to_pem(public_key):
     pem_key = public_key.save_pkcs1(format='PEM')
     return pem_key.decode()
 
-def create_tenant(tenant_id, name, public_key):
+def create_tenant(name, public_key):
     headers = {'Content-Type': 'application/json'}
     data = {
-        'tenantId': tenant_id,
         'name': name,
         'publicKey': public_key_to_pem(public_key)  # Pass public key in PEM format
     }
@@ -38,25 +39,38 @@ def sign_message(message):
 def verify_signature(name, message, signature):
     headers = {'Content-Type': 'application/json'}
     data = {
-        'name': name,
-        'message': message,
+        'tenantName': name,
+        'manifest': message,  # Send the entire YAML content as the message
         'signature': signature
     }
-    response = requests.post(VERIFY_SIGNATURE_URL, headers=headers, data=json.dumps(data))
+    response = requests.post(POD_DEPLOYMENT_URL, headers=headers, data=json.dumps(data))
     if response.status_code == 200:
         print('Signature verification successful')
     else:
         print('Signature verification failed:', response.text)
 
 # Usage
-tenant_id = '1'
-tenant_name = 'TenantA'
-message = 'This is a test message'
+tenant_name = f'Tenant-{random.randint(0,500)}'
+message = '''
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis-pod
+  labels:
+    app: redis
+spec:
+  nodeName: worker1  # Specify the node where you want to deploy the pod
+  containers:
+  - name: redis
+    image: redis:latest
+    ports:
+    - containerPort: 6379
+'''
 
 # Create a new tenant with the public key in PEM format
-create_tenant(tenant_id, tenant_name, public_key)
+create_tenant(tenant_name, public_key)
 
-# Sign the message
+# Sign the YAML content (message)
 signature = sign_message(message)
 
 # Verify the signature

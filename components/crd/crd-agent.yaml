@@ -36,6 +36,12 @@ spec:
                     properties:
                       podName:
                         type: string
+                      tenantID:
+                        type: string
                       status:
                         type: string
-
+                      reason:
+                        type: string
+                      lastCheck:
+                        type: string
+                        format: date-time

@@ -54,11 +54,19 @@ func main() {
 	watchPods()
 }
 
+func getTenantIDFromPodName(podName string) string {
+
+	parts := strings.Split(podName, "-tenant-")
+
+	// The tenantID is the last part of the split array
+	tenantID := parts[len(parts)-1]
+	return tenantID
+}
+
 func getKubernetesClient() (*kubernetes.Clientset, dynamic.Interface, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
-		fmt.Println(kubeconfig)
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
 			return nil, nil, err
@@ -143,6 +151,7 @@ func updateAgentCRDWithPodStatus(nodeName, podName, status string) {
 	if status != "Deleted" {
 		newPodStatus = append(newPodStatus, map[string]interface{}{
 			"podName":   podName,
+			"tenantID":  getTenantIDFromPodName(podName),
 			"status":    status,
 			"reason":    "reason of new status",
 			"lastCheck": time.Now().Format("2006-01-02T15:04:05Z07:00"),
