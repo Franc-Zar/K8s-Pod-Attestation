@@ -32,55 +32,59 @@ var (
 	yellow *color.Color
 )
 
-func main() {
+// loadEnvironmentVariables loads required environment variables and sets default values if necessary.
+func loadEnvironmentVariables() {
+	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
+}
+
+// getEnv retrieves the value of an environment variable or returns a default value if not set.
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		if key == "ATTESTATION_NAMESPACE" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		}
+		return defaultValue
+	}
+	return value
+}
+
+// initializeColors sets up color variables for console output.
+func initializeColors() {
 	red = color.New(color.FgRed)
 	green = color.New(color.FgGreen)
 	yellow = color.New(color.FgYellow)
+}
 
+// configureKubernetesClient initializes the Kubernetes client.
+func configureKubernetesClient() {
 	var err error
-	// Initialize Kubernetes client
-	clientset, dynamicClient, err = getKubernetesClient()
-	if err != nil {
-		panic(err)
-	}
-
-	attestationNamespace = os.Getenv("attestation_namespace")
-	if attestationNamespace == "" {
-		fmt.Printf(yellow.Sprintf("[%s] 'attestation_namespace' environment variable missing: setting 'default' value\n", time.Now().Format("02-01-2006 15:04:05")))
-		attestationNamespace = "default"
-	}
-
-	// Watch for node events
-	watchPods()
-}
-
-func getTenantIDFromPodName(podName string) string {
-
-	parts := strings.Split(podName, "-tenant-")
-
-	// The tenantID is the last part of the split array
-	tenantID := parts[len(parts)-1]
-	return tenantID
-}
-
-func getKubernetesClient() (*kubernetes.Clientset, dynamic.Interface, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			return nil, nil, err
+			panic(err)
 		}
 	}
-	clientset, err := kubernetes.NewForConfig(config)
+	dynamicClient = dynamic.NewForConfigOrDie(config)
+	clientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
-		return nil, nil, err
+		panic(err)
 	}
-	dynamicClient, err := dynamic.NewForConfig(config)
+}
+
+// Check if Node being considered is Control Plane
+func nodeIsControlPlane(nodeName string) bool {
+	// Get the node object to check for control plane label
+	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, v1.GetOptions{})
 	if err != nil {
-		return nil, nil, err
+		return false
 	}
-	return clientset, dynamicClient, nil
+
+	// Check if the node is a control plane node
+	_, exists := node.Labels["node-role.kubernetes.io/control-plane"]
+	return exists
 }
 
 func watchPods() {
@@ -101,7 +105,7 @@ func watchPods() {
 			}
 
 			nodeName := pod.Spec.NodeName
-			if nodeName == "" || strings.Contains(pod.Name, "agent") {
+			if nodeName == "" || strings.Contains(pod.Name, "agent") || nodeIsControlPlane(nodeName) {
 				continue
 			}
 
@@ -170,4 +174,20 @@ func updateAgentCRDWithPodStatus(nodeName, podName, status string) {
 	}
 
 	fmt.Printf(green.Sprintf("[%s] Agent CRD 'agent-%s' updated. Involved Pod: %s\n", time.Now().Format("02-01-2006 15:04:05"), nodeName, podName))
+}
+
+func getTenantIDFromPodName(podName string) string {
+	parts := strings.Split(podName, "-tenant-")
+	// The tenantID is the last part of the split array
+	tenantID := parts[len(parts)-1]
+	return tenantID
+}
+
+func main() {
+	initializeColors()
+	configureKubernetesClient()
+	loadEnvironmentVariables()
+
+	// Watch for Pod events
+	watchPods()
 }

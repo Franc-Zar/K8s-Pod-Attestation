@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -48,21 +49,34 @@ var (
 )
 
 var (
-	red    *color.Color
-	green  *color.Color
-	yellow *color.Color
-	blue   *color.Color
+	red           *color.Color
+	green         *color.Color
+	yellow        *color.Color
+	registrarPORT string
 )
 
-var registrarPORT string
-
-func setRegistrarPort() {
-	registrarPORT = os.Getenv("REGISTRAR_PORT")
-	if registrarPORT == "" {
-		registrarPORT = "8080"
-		//log.Fatal("REGISTRAR_PORT is not set")
+// getEnv retrieves the value of an environment variable or returns a default value if not set.
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		if key == "ATTESTATION_NAMESPACE" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		}
+		return defaultValue
 	}
-	return
+	return value
+}
+
+// initializeColors sets up color variables for console output.
+func initializeColors() {
+	red = color.New(color.FgRed)
+	green = color.New(color.FgGreen)
+	yellow = color.New(color.FgYellow)
+}
+
+// loadEnvironmentVariables loads required environment variables and sets default values if necessary.
+func loadEnvironmentVariables() {
+	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
 }
 
 // Tenant functions
@@ -110,17 +124,41 @@ func insertTenant(tenant Tenant) error {
 	return err
 }
 
-// Utility function: Verify a signature using provided public key
-func verifySignature(publicKeyPEM string, message, signature string) error {
+func decodePublicKeyFromPEM(publicKeyPEM string) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
-		return errors.New("failed to decode PEM block containing public key")
+		return nil, errors.New("failed to decode PEM block containing public key")
 	}
 
-	rsaPubKey, err := x509.ParsePKCS1PublicKey(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse PKCS1 public key: %v", err)
+	var rsaPubKey *rsa.PublicKey
+	var err error
+
+	switch block.Type {
+	case "RSA PUBLIC KEY":
+		rsaPubKey, err = x509.ParsePKCS1PublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse PKCS1 public key: %v", err)
+		}
+	case "PUBLIC KEY":
+		parsedKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse PKIX public key: %v", err)
+		}
+		var ok bool
+		rsaPubKey, ok = parsedKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, errors.New("not an RSA public key")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported public key type: %s", block.Type)
 	}
+
+	return rsaPubKey, nil
+}
+
+// Utility function: Verify a signature using provided public key
+func verifySignature(publicKeyPEM string, message, signature string) error {
+	rsaPubKey, err := decodePublicKeyFromPEM(publicKeyPEM)
 
 	hashed := sha256.Sum256([]byte(message))
 	sigBytes, err := base64.StdEncoding.DecodeString(signature)
@@ -386,6 +424,7 @@ func verifyWorkerSignature(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Signature verification successful", "status": "success"})
+	return
 }
 
 // Endpoint: Get worker by name (using GET method)
@@ -434,22 +473,15 @@ func deleteWorkerByName(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Worker deleted successfully"})
 }
 
-func main() {
-	red = color.New(color.FgRed)
-	green = color.New(color.FgGreen)
-	yellow = color.New(color.FgYellow)
-	blue = color.New(color.FgBlue)
-
-	setRegistrarPort()
-
-	// Open database connection
+// initializeDatabase sets up the database and creates necessary tables if they don't exist.
+func initializeDatabase() error {
 	var err error
 	db, err = sql.Open("sqlite", "./tenants.db")
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Create tenants table if it doesn't exist
+	// Create tenants table
 	createTenantTableQuery := `
 	CREATE TABLE IF NOT EXISTS tenants (
 		tenantId TEXT PRIMARY KEY,
@@ -457,10 +489,10 @@ func main() {
 		publicKey TEXT NOT NULL UNIQUE
 	);`
 	if _, err = db.Exec(createTenantTableQuery); err != nil {
-		log.Fatal("Failed to create tenants table:", err)
+		return fmt.Errorf("failed to create tenants table: %w", err)
 	}
 
-	// Create workers table if it doesn't exist
+	// Create workers table
 	createWorkerTableQuery := `
 	CREATE TABLE IF NOT EXISTS workers (
 		workerId TEXT PRIMARY KEY,
@@ -468,7 +500,19 @@ func main() {
 		AIK TEXT NOT NULL UNIQUE
 	);`
 	if _, err = db.Exec(createWorkerTableQuery); err != nil {
-		log.Fatal("Failed to create workers table:", err)
+		return fmt.Errorf("failed to create workers table: %w", err)
+	}
+
+	return nil
+}
+
+func main() {
+	initializeColors()
+	loadEnvironmentVariables()
+
+	// Initialize the database
+	if err := initializeDatabase(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
 	defer db.Close()
@@ -488,7 +532,7 @@ func main() {
 
 	// Start the server
 	fmt.Printf(green.Sprintf("Registrar is running on port: %s\n", registrarPORT))
-	err = r.Run(":" + registrarPORT)
+	err := r.Run(":" + registrarPORT)
 	if err != nil {
 		log.Fatal("Error while starting Registrar server")
 	}

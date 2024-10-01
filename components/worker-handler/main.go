@@ -16,8 +16,10 @@ import (
 	"github.com/fatih/color"
 	"io"
 	"io/ioutil"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/homedir"
-	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -33,34 +34,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-)
-
-// Global Kubernetes clientset variable
-var clientset *kubernetes.Clientset
-var dynamicClient dynamic.Interface
-
-var attestationNamespace string
-
-var registrarPORT string
-var registrarHOST string
-var agentHOST string
-var agentPORT string
-
-// Helper to verify environment variables
-func verifyEnvVars() {
-	if registrarHOST == "" || registrarPORT == "" || agentHOST == "" || agentPORT == "" {
-		registrarHOST = "localhost"
-		registrarPORT = "8080"
-		agentHOST = "localhost"
-		agentPORT = "8083"
-	}
-}
-
-// Color variables for output
-var (
-	red    *color.Color
-	green  *color.Color
-	yellow *color.Color
 )
 
 // Struct definitions
@@ -92,11 +65,47 @@ type ChallengeResponse struct {
 	HMAC    string `json:"HMAC"`
 }
 
-// Constants
-const (
-	CRDGroupVersion = "example.com/v1"
-	AgentCoreImage  = "franczar/k8s-attestation-agent-core:latest"
+// Color variables for output
+var (
+	red                  *color.Color
+	green                *color.Color
+	yellow               *color.Color
+	clientset            *kubernetes.Clientset
+	dynamicClient        dynamic.Interface
+	attestationNamespace string
+	registrarPORT        string
+	registrarHOST        string
+	agentHOST            string
+	agentPORT            string
 )
+
+// initializeColors sets up color variables for console output.
+func initializeColors() {
+	red = color.New(color.FgRed)
+	green = color.New(color.FgGreen)
+	yellow = color.New(color.FgYellow)
+}
+
+// loadEnvironmentVariables loads required environment variables and sets default values if necessary.
+func loadEnvironmentVariables() {
+	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
+	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
+	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
+	agentHOST = getEnv("AGENT_HOST", "10.0.2.8")
+	agentPORT = getEnv("AGENT_PORT", "30000")
+}
+
+// getEnv retrieves the value of an environment variable or returns a default value if not set.
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		if key == "ATTESTATION_NAMESPACE" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		}
+		return defaultValue
+	}
+	return value
+}
 
 // Helper function to verify HMAC
 func verifyHMAC(message, ephemeralKey, providedHMAC []byte) error {
@@ -120,49 +129,22 @@ func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) ([]byte, error) {
 	return encryptedData, nil
 }
 
-// Main function
-func main() {
-	red = color.New(color.FgRed)
-	green = color.New(color.FgGreen)
-	yellow = color.New(color.FgYellow)
-
-	verifyEnvVars()
-
+// configureKubernetesClient initializes the Kubernetes client.
+func configureKubernetesClient() {
 	var err error
-	clientset, dynamicClient, err = getKubernetesClient()
-	if err != nil {
-		panic(err)
-	}
-
-	attestationNamespace = os.Getenv("attestation_namespace")
-	if attestationNamespace == "" {
-		fmt.Printf(yellow.Sprintf("[%s] 'attestation_namespace' environment variable missing: setting 'default' value\n", time.Now().Format("02-01-2006 15:04:05")))
-		attestationNamespace = "default"
-	}
-
-	deployAgentCRD()
-	watchNodes()
-}
-
-// Kubernetes client setup
-func getKubernetesClient() (*kubernetes.Clientset, dynamic.Interface, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			return nil, nil, err
+			panic(err)
 		}
 	}
-	clientset, err := kubernetes.NewForConfig(config)
+	dynamicClient = dynamic.NewForConfigOrDie(config)
+	clientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
-		return nil, nil, err
+		panic(err)
 	}
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return nil, nil, err
-	}
-	return clientset, dynamicClient, nil
 }
 
 // Watch for node events
@@ -185,21 +167,37 @@ func watchNodes() {
 	}
 }
 
+func nodeIsRegistered(nodeName string) bool {
+	registrarSearchWorkerURL := fmt.Sprintf("http://%s:%s/worker/getIdByName?name=%s", registrarHOST, registrarPORT, nodeName)
+
+	resp, err := http.Get(registrarSearchWorkerURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	return true
+}
+
 // Handle events for nodes
 func handleNodeEvent(event watch.Event, node *corev1.Node) {
 	switch event.Type {
+	case watch.Added:
+		if !nodeIsControlPlane(node) && !nodeIsRegistered(node.Name) {
+			fmt.Printf(green.Sprintf("[%s] Worker node %s joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+			workerRegistration(node)
+			createAgentCRDInstance(node.Name)
+		}
+
 	case watch.Deleted:
 		if !nodeIsControlPlane(node) {
 			fmt.Printf(yellow.Sprintf("[%s] Worker node %s deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 			workerRemoval(node)
 			deleteAgentCRDInstance(node.Name)
-		}
-
-	case watch.Added:
-		if !nodeIsControlPlane(node) {
-			fmt.Printf(green.Sprintf("[%s] Worker node %s joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
-			workerRegistration(node)
-			createAgentCRDInstance(node.Name)
 		}
 	}
 }
@@ -294,43 +292,71 @@ func workerRemoval(node *corev1.Node) {
 	fmt.Printf(yellow.Sprintf("Worker Node: %s removed with success\n", node.GetName()))
 }
 
+func waitForAgent(retryInterval, timeout time.Duration) error {
+	address := fmt.Sprintf("%s:%s", agentHOST, agentPORT)
+	start := time.Now()
+
+	for {
+		// Try to establish a TCP connection to the host
+		conn, err := net.DialTimeout("tcp", address, retryInterval)
+		if err == nil {
+			// If the connection is successful, close it and return
+			conn.Close()
+			return nil
+		}
+
+		// Check if the timeout has been exceeded
+		if time.Since(start) > timeout {
+			return fmt.Errorf("timeout: Agent is not reachable after %v", timeout)
+		}
+
+		// Wait for the retry interval before trying again
+		time.Sleep(retryInterval)
+	}
+}
+
 // workerRegistration registers the worker node by calling the identification API
 func workerRegistration(node *corev1.Node) {
 	agentIdentifyURL := fmt.Sprintf("http://%s:%s/agent/worker/identify", agentHOST, agentPORT)
 	agentChallengeNodeURL := fmt.Sprintf("http://%s:%s/agent/worker/challenge", agentHOST, agentPORT)
 	registrarWorkerCreationURL := fmt.Sprintf("http://%s:%s/worker/create", registrarHOST, registrarPORT)
 
+	err := waitForAgent(5*time.Second, 1*time.Minute)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error while contacting Agent: %v\n", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
+	}
+
 	// Call Agent to identify worker data
 	workerData, err := callAgentIdentify(agentIdentifyURL)
 	if err != nil {
-		log.Printf("Failed to call Agent API: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to call Agent API: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
 	// Decode EK and AIK
 	EK, err := decodePublicKeyFromPEM(workerData.EK)
 	if err != nil {
-		log.Printf("Failed to parse EK from PEM: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to parse EK from PEM: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
 	AIK, err := decodePublicKeyFromPEM(workerData.AIK)
 	if err != nil {
-		log.Printf("Failed to parse AIK from PEM: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to parse AIK from PEM: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
 	// Calculate AIK digest
 	aikDigest, err := calculateAIKDigest(AIK)
 	if err != nil {
-		log.Printf("Failed to calculate AIK digest: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to calculate AIK digest: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
 	// Generate ephemeral key
 	ephemeralKey, err := generateEphemeralKey(32)
 	if err != nil {
-		log.Printf("Failed to generate ephemeral key: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to generate ephemeral key: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
@@ -340,7 +366,7 @@ func workerRegistration(node *corev1.Node) {
 	// Encrypt the WorkerChallengePayload with the EK public key
 	encryptedChallenge, err := encryptWithEK(EK, []byte(challengePayload))
 	if err != nil {
-		log.Printf("Failed to encrypt challengePayload with EK: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to encrypt challengePayload with EK: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
@@ -352,19 +378,19 @@ func workerRegistration(node *corev1.Node) {
 	// Send challenge request to the agent
 	challengeResponse, err := sendChallengeRequest(agentChallengeNodeURL, workerChallenge)
 	if err != nil {
-		log.Printf("Failed to send challenge request: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to send challenge request: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
 	decodedHMAC, err := base64.StdEncoding.DecodeString(challengeResponse.HMAC)
 	if err != nil {
-		log.Printf("Failed to decode HMAC: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to decode HMAC: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
 	// Verify the HMAC response from the agent
 	if err := verifyHMAC([]byte(workerData.UUID), ephemeralKey, decodedHMAC); err != nil {
-		log.Printf("Failed to verify HMAC: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to verify HMAC: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
@@ -377,11 +403,11 @@ func workerRegistration(node *corev1.Node) {
 	// Create a new worker
 	createWorkerResponse, err := createWorker(registrarWorkerCreationURL, &workerNode)
 	if err != nil {
-		log.Printf("Failed to create Worker Node: %v", err)
+		fmt.Printf(red.Sprintf("[%s] Failed to create Worker Node: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
-	fmt.Printf(green.Sprintf("Successfully registered Worker Node: %s\n", createWorkerResponse.WorkerId))
+	fmt.Printf(green.Sprintf("[%s] Successfully registered Worker Node: %s\n", time.Now().Format("02-01-2006 15:04:05"), createWorkerResponse.WorkerId))
 }
 
 // Helper function to call the agent identification API
@@ -465,72 +491,65 @@ func createAgentCRDInstance(nodeName string) {
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 	})
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error getting pods on node %s: %v\n", nodeName, err))
+		fmt.Printf(red.Sprintf("[%s] Error getting pods on node %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
 		return
 	}
 
-	// Initialize YAML content with agent details
-	yamlContent := fmt.Sprintf(`
-apiVersion: %s
-kind: Agent
-metadata:
-  name: agent-%s
-  namespace: kube-system
-spec:
-  agentName: agent-%s
-  agentStatus: Ready
-  nodeStatus: Trusted
-  enabled: true
-  podStatus:
-`, CRDGroupVersion, nodeName, nodeName)
-
-	// Add pod status entries to YAML content
+	// Prepare podStatus array for the Agent CRD spec
+	var podStatus []map[string]interface{}
 	for _, pod := range pods.Items {
 		podName := pod.Name
 		tenantID := getTenantIDFromPodName(podName)
 
-		// Skip pods with name prefixed with "agent-core-"
-		if strings.HasPrefix(podName, "agent-core-") {
+		// Skip pods with name prefixed with "agent-"
+		if strings.HasPrefix(podName, "agent-") {
 			continue
 		}
-		// Append pod status entry to YAML content
-		yamlContent += fmt.Sprintf(`
-  - podName: "%s"
-    tenantID: "%s"
-    status: "Trusted"
-    reason: "Pod attestation successful"
-    lastCheck: %s
-`, podName, tenantID, time.Now().Format("2006-01-02T15:04:05Z07:00"))
+
+		// Add each pod status to the array
+		podStatus = append(podStatus, map[string]interface{}{
+			"podName":   podName,
+			"tenantID":  tenantID,
+			"status":    "Trusted",
+			"reason":    "Pod attestation successful",
+			"lastCheck": time.Now().Format(time.RFC3339),
+		})
 	}
 
-	// Create the directory if it doesn't exist
-	dir := filepath.Join("deployed-crds")
-	err = os.MkdirAll(dir, 0755)
+	// Construct the Agent CRD instance
+	agent := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "example.com/v1",
+			"kind":       "Agent",
+			"metadata": map[string]interface{}{
+				"name":      fmt.Sprintf("agent-%s", nodeName),
+				"namespace": "kube-system",
+			},
+			"spec": map[string]interface{}{
+				"agentName":   fmt.Sprintf("agent-%s", nodeName),
+				"agentStatus": "Ready",
+				"nodeStatus":  "Trusted",
+				"enabled":     true,
+				"podStatus":   podStatus,
+			},
+		},
+	}
+
+	// Define the resource to create
+	gvr := schema.GroupVersionResource{
+		Group:    "example.com", // Group name defined in your CRD
+		Version:  "v1",
+		Resource: "agents",
+	}
+
+	// Create the Agent CRD instance in the kube-system namespace
+	_, err = dynamicClient.Resource(gvr).Namespace("kube-system").Create(context.TODO(), agent, v1.CreateOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error creating directory: %v\n", err))
+		fmt.Printf(red.Sprintf("[%s] Error creating Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
-	// Write YAML content to a file
-	fileName := filepath.Join(dir, fmt.Sprintf("agent-%s.yaml", nodeName))
-	err = ioutil.WriteFile(fileName, []byte(yamlContent), 0644)
-	if err != nil {
-		fmt.Printf(red.Sprintf("Error writing to file: %v\n", err))
-		return
-	}
-
-	fmt.Printf(green.Sprintf("[%s] Agent CRD instance created: %s\n", time.Now().Format("02-01-2006 15:04:05"), fileName))
-
-	// Apply YAML file using kubectl apply command
-	cmd := exec.Command("kubectl", "apply", "-f", fileName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf(red.Sprintf("Error applying YAML file: %v\n", err))
-		fmt.Println(red.Sprintln(string(output)))
-		return
-	}
-
-	fmt.Printf(green.Sprintf("[%s] Agent CRD instance applied: %s\n", time.Now().Format("02-01-2006 15:04:05"), fileName))
+	fmt.Printf(green.Sprintf("[%s] Agent CRD instance created for node %s\n", time.Now().Format("02-01-2006 15:04:05"), nodeName))
 }
 
 func deployAgentCRD() {
@@ -608,89 +627,26 @@ spec:
 	fmt.Printf(green.Sprintf("[%s] CRD 'agents.example.com' created successfully\n", time.Now().Format("02-01-2006 15:04:05")))
 }
 
-func deployAgentCore(nodeName string) {
-	replicas := int32(1)
-
-	deployment := &appsv1.Deployment{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      "agent-core-" + nodeName,
-			Namespace: "kube-system",
-			Labels: map[string]string{
-				"app": "agent-core",
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &v1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "agent-core",
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: v1.ObjectMeta{
-					Labels: map[string]string{
-						"app": "agent-core",
-					},
-				},
-				Spec: corev1.PodSpec{
-					NodeSelector: map[string]string{
-						"kubernetes.io/hostname": nodeName,
-					},
-					Containers: []corev1.Container{
-						{
-							Name:  "agent-core-container",
-							Image: AgentCoreImage,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	_, err := clientset.AppsV1().Deployments("kube-system").Create(context.Background(), deployment, v1.CreateOptions{})
-	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error deploying Agent Core: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
-	}
-
-	fmt.Printf(green.Sprintf("[%s] Agent Core deployed on node %s \n", time.Now().Format("02-01-2006 15:04:05"), nodeName))
-}
-
-func deleteAgentCore(nodeName string) {
-	deploymentName := "agent-core-" + nodeName
-
-	err := clientset.AppsV1().Deployments("kube-system").Delete(context.Background(), deploymentName, v1.DeleteOptions{})
-	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error deleting Agent Core: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
-	}
-
-	fmt.Printf(yellow.Sprintf("[%s] Agent Core deleted\n", time.Now().Format("02-01-2006 15:04:05")))
-}
-
 func deleteAgentCRDInstance(nodeName string) {
-	fileName := filepath.Join("deployed-crds", fmt.Sprintf("agent-%s.yaml", nodeName))
+	// Construct the name of the Agent CRD based on the node name
+	agentCRDName := fmt.Sprintf("agent-%s", nodeName)
 
-	// Apply YAML file using kubectl apply command
-	cmd := exec.Command("kubectl", "delete", "-f", fileName)
-	output, err := cmd.CombinedOutput()
+	// Define the GroupVersionResource for the Agent CRD
+	gvr := schema.GroupVersionResource{
+		Group:    "example.com", // Group name defined in your CRD
+		Version:  "v1",
+		Resource: "agents", // Plural form of the CRD resource name
+	}
+
+	// Delete the Agent CRD instance in the "kube-system" namespace
+	err := dynamicClient.Resource(gvr).Namespace("kube-system").Delete(context.TODO(), agentCRDName, v1.DeleteOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error deleting YAML file: %v\n", err))
-		fmt.Println(red.Println(string(output)))
+		fmt.Printf(red.Sprintf("[%s] Error deleting Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
-	fmt.Printf(yellow.Sprintf("[%s] Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), fileName))
-
-	err = os.Remove(fileName)
-	if err != nil && !os.IsNotExist(err) {
-		fmt.Printf("Error deleting file: %v\n", err)
-		return
-	}
-
-	fmt.Printf(yellow.Sprintf("[%s] Agent CRD instance YAML deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), fileName))
+	fmt.Printf(yellow.Sprintf("[%s] Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentCRDName))
 }
-
 func getTenantIDFromPodName(podName string) string {
 
 	parts := strings.Split(podName, "-tenant-")
@@ -698,4 +654,14 @@ func getTenantIDFromPodName(podName string) string {
 	// The tenantID is the last part of the split array
 	tenantID := parts[len(parts)-1]
 	return tenantID
+}
+
+// Main function
+func main() {
+	initializeColors()
+	loadEnvironmentVariables()
+	configureKubernetesClient()
+
+	deployAgentCRD()
+	watchNodes()
 }
