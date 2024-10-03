@@ -3,7 +3,6 @@ package main
 import (
 	"crypto"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -14,7 +13,11 @@ import (
 	"fmt"
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
+	"github.com/google/go-tpm-tools/client"
+	"github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/tpmutil"
 	"github.com/google/uuid"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -48,6 +51,7 @@ var (
 	yellow    *color.Color
 	agentPORT string
 	workerId  string
+	TPMPath   string
 )
 
 // TEST PURPOSE
@@ -61,13 +65,32 @@ r5CVeqp2BrstdZtrWVRuQAKip9c7hl+mHODkE5yb0InHyRe5WWr5P7wtXtAPM6SO
 mFe/c/Cma1pM+702X6ULf0/BIMJkWzD3INdLtk8FE8rIxrrMSnDtmWw9BgGdsDgk
 pQIDAQAB
 -----END PUBLIC KEY-----`
-	privateAIK *rsa.PrivateKey
-	privateEK  *rsa.PrivateKey
+	privateAIK crypto.PrivateKey
+	privateEK  crypto.PrivateKey
 )
+
+var (
+	rwc       io.ReadWriteCloser
+	AIKHandle tpmutil.Handle
+)
+
+func openTPM() {
+	rwc, err := tpmutil.OpenTPM(TPMPath)
+	if err != nil {
+		fmt.Printf(red.Sprintf("can't open TPM: %v\n", err))
+		return
+	}
+	defer func() {
+		rwc.Close()
+	}()
+
+	return
+}
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
 	agentPORT = getEnv("AGENT_PORT", "8083")
+	TPMPath = getEnv("TPM_PATH", "/dev/tpm0")
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
@@ -89,17 +112,53 @@ func initializeColors() {
 	yellow = color.New(color.FgYellow)
 }
 
-// Mock function to get AIK (Attestation Identity Key)
-func getWorkerAIK() (*rsa.PublicKey, error) {
-	// TPM interactions TODO - for now, generate a mock RSA key pair
-	var err error
-	privateAIK, err = rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve AIK: %v", err)
+func getWorkerPublicAIK() (crypto.PublicKey, error) {
+	if AIKHandle.HandleValue() == 0 {
+		return nil, fmt.Errorf("AIK is not already created")
 	}
 
+	retrievedAK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.AKTemplateRSA(), AIKHandle)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to retrieve AIK from TPM")
+	}
+	return retrievedAK.PublicKey(), nil
+}
+
+// Mock function to get EK (Endorsement Key)
+func getWorkerEKandCertificate() (crypto.PublicKey, string, error) {
+	EK, err := client.EndorsementKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
+	}
+	defer EK.Close()
+
+	EKCert := EK.Cert()
+	pemEKCert := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: EKCert.Raw,
+	})
+
+	pemPublicEK := encodePublicKeyToPEM(EK.PublicKey())
+
+	return pemPublicEK, string(pemEKCert), nil
+}
+
+// Mock function to get AIK (Attestation Identity Key)
+func createWorkerAIK() (crypto.PublicKey, error) {
+	// TPM interactions TODO - for now, generate a mock RSA key pair
+	AIK, err := client.AttestationKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR: could not get AttestationKeyRSA: %v", err)
+	}
+	defer AIK.Close()
+
+	// used to later retrieve newly created AIK inside the TPM
+	AIKHandle = AIK.Handle()
+
+	pemPublicAIK := encodePublicKeyToPEM(AIK.PublicKey())
+
 	// Return the public key part of the generated AIK
-	return &privateAIK.PublicKey, nil
+	return pemPublicAIK, nil
 }
 
 // extract AIKDigest and ephemeral Key from received challenge
@@ -124,21 +183,8 @@ func extractChallengeElements(challenge string) (string, []byte, error) {
 	return AIKDigest, ephemeralKey, nil
 }
 
-// Mock function to get EK (Endorsement Key)
-func getWorkerEK() (*rsa.PublicKey, error) {
-	// TPM interactions TODO - for now, generate a mock RSA key pair
-	var err error
-	privateEK, err = rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve EK: %v", err)
-	}
-
-	// Return the public key part of the generated EK
-	return &privateEK.PublicKey, nil
-}
-
 // Helper function to encode the public key to PEM format (for printing)
-func encodePublicKeyToPEM(pubKey *rsa.PublicKey) string {
+func encodePublicKeyToPEM(pubKey crypto.PublicKey) string {
 	pubASN1, err := x509.MarshalPKIXPublicKey(pubKey)
 	if err != nil {
 		return ""
@@ -152,14 +198,16 @@ func encodePublicKeyToPEM(pubKey *rsa.PublicKey) string {
 
 func getWorkerIdentifyingData(c *gin.Context) {
 	workerId = uuid.New().String()
-	workerAIK, err := getWorkerAIK()
+
+	// TODO send ek certificate to be validated _
+	workerEK, _, err := getWorkerEKandCertificate()
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"message": err.Error(), "status": "error"})
 		return
 	}
 
-	workerEK, err := getWorkerEK()
+	workerAIK, err := createWorkerAIK()
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"message": err.Error(), "status": "error"})
@@ -217,32 +265,45 @@ func verifySignature(publicKeyPEM string, message string, signature string) erro
 }
 
 // Utility function: Sign a message using the provided private key
-func signMessage(rsaPrivateKey *rsa.PrivateKey, message string) (string, error) {
-	// Hash the message using SHA256
-	hashed := sha256.Sum256([]byte(message))
-
-	// Sign the hashed message using the private key
-	signature, err := rsa.SignPKCS1v15(rand.Reader, rsaPrivateKey, crypto.SHA256, hashed[:])
-	if err != nil {
-		return "", fmt.Errorf("failed to sign message: %v", err)
+func signWithAIK(message string) (string, error) {
+	if AIKHandle.HandleValue() == 0 {
+		return "", fmt.Errorf("AIK is not already created")
 	}
 
-	// Encode the signature in Base64 and return it
-	return base64.StdEncoding.EncodeToString(signature), nil
+	AIK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.AKTemplateRSA(), AIKHandle)
+	if err != nil {
+		return "", fmt.Errorf("Failed to retrieve AIK from TPM")
+	}
+
+	defer AIK.Close()
+
+	AIKSignedData, err := AIK.SignData([]byte(message))
+	if err != nil {
+		return "", fmt.Errorf("Failed to sign with AIK")
+	}
+	return base64.StdEncoding.EncodeToString(AIKSignedData), nil
 }
 
-// Helper function to decrypt with mock private EK
 func decryptWithEK(encryptedData []byte) ([]byte, error) {
-	// Decrypt the challenge using the mock private EK
-	decryptedData, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateEK, encryptedData, nil)
+	EK, err := client.EndorsementKeyRSA(rwc)
 	if err != nil {
-		return nil, fmt.Errorf("EK decryption failed: %v", err)
+		return nil, fmt.Errorf("ERROR: could not get EndorsementKeyRSA: %v", err)
 	}
+	defer EK.Close()
+
+	decryptedData, err := tpm2.RSADecrypt(rwc, EK.Handle(), "", encryptedData, &tpm2.AsymScheme{
+		Alg:  tpm2.AlgOAEP,
+		Hash: tpm2.AlgSHA256,
+	}, "tpm-asym-scheme")
+	if err != nil {
+		return nil, err
+	}
+
 	return decryptedData, nil
 }
 
 // Helper function to calculate the AIK digest (mock)
-func calculateAIKDigest(AIKPublicKey *rsa.PublicKey) (string, error) {
+func calculateAIKDigest(AIKPublicKey crypto.PublicKey) (string, error) {
 	// Calculate the digest of the mock AIK (using SHA-256 hash)
 	AIKBytes, err := x509.MarshalPKIXPublicKey(AIKPublicKey)
 	if err != nil {
@@ -313,7 +374,7 @@ func podAttestation(c *gin.Context) {
 		return
 	}
 
-	signedEvidence, err := signMessage(privateAIK, string(evidenceJSON))
+	signedEvidence, err := signWithAIK(string(evidenceJSON))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"message": "Failed to sign Evidence",
@@ -353,7 +414,7 @@ func challengeWorkerEK(c *gin.Context) {
 	// Decode the Base64-encoded challenge
 	encryptedChallenge, err := base64.StdEncoding.DecodeString(req.WorkerChallenge)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
+		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": "Invalid Base64 challenge",
 			"status":  "error",
 		})
@@ -363,7 +424,7 @@ func challengeWorkerEK(c *gin.Context) {
 	// Decrypt the challenge using the mock private EK
 	decryptedData, err := decryptWithEK(encryptedChallenge)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": "Decryption failed",
 			"status":  "error",
 		})
@@ -379,8 +440,17 @@ func challengeWorkerEK(c *gin.Context) {
 		return
 	}
 
+	retrievedAIKPublicKey, err := getWorkerPublicAIK()
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"message": "Error while retrieving Agent AIK",
+			"status":  "error",
+		})
+		return
+	}
+
 	// Calculate the mock AIK digest
-	expectedAIKDigest, err := calculateAIKDigest(&privateAIK.PublicKey)
+	expectedAIKDigest, err := calculateAIKDigest(retrievedAIKPublicKey)
 	if err != nil || receivedAIKDigest != expectedAIKDigest {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": "AIK digest verification failed",
@@ -410,7 +480,13 @@ func challengeWorkerEK(c *gin.Context) {
 func main() {
 	initializeColors()
 	loadEnvironmentVariables()
+	openTPM()
 
+	defer func() {
+		if err := rwc.Close(); err != nil {
+			log.Fatalf("\ncan't close TPM: %v", err)
+		}
+	}()
 	// Initialize Gin router
 	r := gin.Default()
 
