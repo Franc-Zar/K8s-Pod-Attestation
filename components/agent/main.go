@@ -14,6 +14,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-tpm-tools/client"
+	"github.com/google/go-tpm-tools/proto/tpm"
 	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 	"github.com/google/uuid"
@@ -284,20 +285,14 @@ func signWithAIK(message string) (string, error) {
 	return base64.StdEncoding.EncodeToString(AIKSignedData), nil
 }
 
-func decryptWithEK(encryptedData []byte) ([]byte, error) {
+func decryptWithEK(encryptedData *tpm.ImportBlob) ([]byte, error) {
 	EK, err := client.EndorsementKeyRSA(rwc)
 	if err != nil {
 		return nil, fmt.Errorf("ERROR: could not get EndorsementKeyRSA: %v", err)
 	}
 	defer EK.Close()
 
-	decryptedData, err := tpm2.RSADecrypt(rwc, EK.Handle(), "", encryptedData, &tpm2.AsymScheme{
-		Alg:  tpm2.AlgOAEP,
-		Hash: tpm2.AlgSHA256,
-	}, "tpm-asym-scheme")
-	if err != nil {
-		return nil, err
-	}
+	decryptedData, err := EK.Import(encryptedData)
 
 	return decryptedData, nil
 }

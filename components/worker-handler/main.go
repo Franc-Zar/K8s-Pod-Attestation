@@ -14,11 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/fatih/color"
+	"github.com/google/go-tpm-tools/server"
 	"io"
 	"io/ioutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/homedir"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -122,10 +124,12 @@ func verifyHMAC(message, ephemeralKey, providedHMAC []byte) error {
 
 // Encrypts data with the provided public key derived from the ephemeral key (EK)
 func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) ([]byte, error) {
-	encryptedData, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicEK, plaintext, nil)
+	importBlob, err := server.CreateImportBlob(publicEK, plaintext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("EK encryption failed: %v", err)
+		log.Fatalf("failed to create import blob: %v", err)
 	}
+	importBlob.String()
+	blobJSON :=
 	return encryptedData, nil
 }
 

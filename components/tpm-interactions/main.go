@@ -2,24 +2,34 @@ package main
 
 import (
 	"crypto"
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"github.com/gogo/protobuf/proto"
 	"github.com/google/go-tpm-tools/client"
-	"github.com/google/go-tpm/legacy/tpm2"
+	pb "github.com/google/go-tpm-tools/proto/tpm"
+	"github.com/google/go-tpm-tools/server"
+	"github.com/google/go-tpm-tools/simulator"
+	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
+	_ "github.com/google/go-tpm/tpm2/transport"
+	"github.com/google/go-tpm/tpmutil"
 	"io"
 	"log"
-
-	"github.com/google/go-tpm/tpmutil"
 )
+
+type ImportBlobJSON struct {
+	Duplicate     string `json:"duplicate"`
+	EncryptedSeed string `json:"encrypted_seed"`
+	PublicArea    string `json:"public_area"`
+	Pcrs          string `json:"pcrs"`
+}
 
 func main() {
 
-	rwc, err := tpmutil.OpenTPM("/dev/tpm0")
+	rwc, err := simulator.GetWithFixedSeedInsecure(1073741825) // tpmutil.OpenTPM("/dev/tpm0")
 	if err != nil {
 		log.Fatalf("can't open TPM: %v", err)
 	}
@@ -31,19 +41,19 @@ func main() {
 
 	//getEK(rwc)
 
-	/*	akHandle := generateAK(rwc)
+	akHandle := generateAK(rwc)
 
-		retrievedAK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.AKTemplateRSA(), akHandle)
-		defer retrievedAK.Close()
-		if err != nil {
-			log.Fatalf(err.Error())
-		}
-		log.Printf("------ Retrieved AK --------")
-		log.Printf(encodePublicKeyToPEM(retrievedAK.PublicKey()))*/
+	retrievedAK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), akHandle)
+	defer retrievedAK.Close()
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	log.Printf("------ Retrieved AK --------")
+	log.Printf(encodePublicKeyToPEM(retrievedAK.PublicKey()))
 
-	/*	log.Printf("------ Signature Verification with AK --------")
-		signature := signDataWithAK(akHandle, "hello world", rwc)
-		verifySignature(retrievedAK.PublicKey().(*rsa.PublicKey), "hello world", signature)*/
+	log.Printf("------ Signature Verification with AK --------")
+	signature := signDataWithAK(akHandle, "hello world", rwc)
+	verifySignature(retrievedAK.PublicKey().(*rsa.PublicKey), "hello world", signature)
 
 	log.Printf("------ Encrypting challenge using EK --------")
 	ekk, err := client.EndorsementKeyRSA(rwc)
@@ -52,24 +62,33 @@ func main() {
 	}
 	defer ekk.Close()
 	ciphertext := encryptWithEK(ekk.PublicKey().(*rsa.PublicKey), []byte("secret challenge"))
-	decryptedData := decryptWithEK(ekk.Handle(), rwc, ciphertext)
+	log.Printf("------ Decrypting challenge using EK --------")
+
+	decryptedData := decryptWithEK(rwc, ciphertext)
 
 	if string(decryptedData) == "secret challenge" {
 		log.Printf("------ Successfully decrypted challenge using EK: %s --------", string(decryptedData))
 	}
+
 }
 
 // Encrypts data with the provided public key derived from the ephemeral key (EK)
-func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) []byte {
-	encryptedData, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicEK, plaintext, nil)
+func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) string {
+	importBlob, err := server.CreateImportBlob(publicEK, plaintext, nil)
 	if err != nil {
-		log.Fatalf("Failed to encrypt with EK: %v", err)
+		log.Fatalf("failed to create import blob: %v", err)
 	}
-	return encryptedData
+	data, err := proto.Marshal(importBlob)
+	if err != nil {
+		log.Fatalf("marshaling error: ", err)
+	}
+
+	encodedChallenge := base64.StdEncoding.EncodeToString(data)
+	return encodedChallenge
 }
 
 func signDataWithAK(ekHandle tpmutil.Handle, message string, rwc io.ReadWriter) string {
-	AK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.AKTemplateRSA(), ekHandle)
+	AK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), ekHandle)
 	if err != nil {
 		log.Fatalf("ERROR:  could not get EndorsementKeyRSA: %v", err)
 	}
@@ -82,21 +101,28 @@ func signDataWithAK(ekHandle tpmutil.Handle, message string, rwc io.ReadWriter) 
 	return signatureB64
 }
 
-func decryptWithEK(ekHandle tpmutil.Handle, rwc io.ReadWriter, encryptedData []byte) []byte {
-	EK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.DefaultEKTemplateRSA(), ekHandle)
+func decryptWithEK(rwc io.ReadWriter, encryptedData string) []byte {
+	decodedData, err := base64.StdEncoding.DecodeString(encryptedData)
 	if err != nil {
-		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
+		log.Fatalf("Error decoding data: %v", err)
 	}
-	defer EK.Close()
 
-	decryptedData, err := tpm2.RSADecrypt(rwc, EK.Handle(), "", encryptedData, &tpm2.AsymScheme{
-		Alg:  tpm2.AlgOAEP,
-		Hash: tpm2.AlgSHA256,
-	}, "")
+	blob := &pb.ImportBlob{}
+	err = proto.Unmarshal(decodedData, blob)
 	if err != nil {
-		log.Fatalf("Failed to decrypt using EK: %v", err)
+		log.Fatalf("Failed to retrieve Blob: %v", err)
 	}
-	return decryptedData
+
+	ek, err := client.EndorsementKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR:  could not get EndorsementKeyRSA: %v", err)
+	}
+	defer ek.Close()
+	output, err := ek.Import(blob)
+	if err != nil {
+		log.Fatalf("failed to import blob: %v", err)
+	}
+	return output
 }
 
 func verifySignature(rsaPubKey *rsa.PublicKey, message, signature string) {
