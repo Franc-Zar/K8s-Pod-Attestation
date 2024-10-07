@@ -20,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/homedir"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -65,6 +64,12 @@ type ChallengeResponse struct {
 	Message string `json:"message"`
 	Status  string `json:"status"`
 	HMAC    string `json:"HMAC"`
+}
+
+type ImportBlobTransmitted struct {
+	Duplicate     string `json:"duplicate"`
+	EncryptedSeed string `json:"encrypted_seed"`
+	PublicArea    string `json:"public_area"`
 }
 
 // Color variables for output
@@ -123,14 +128,25 @@ func verifyHMAC(message, ephemeralKey, providedHMAC []byte) error {
 }
 
 // Encrypts data with the provided public key derived from the ephemeral key (EK)
-func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) ([]byte, error) {
+func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) (string, error) {
+	// Create the ImportBlob using the public EK
 	importBlob, err := server.CreateImportBlob(publicEK, plaintext, nil)
 	if err != nil {
-		log.Fatalf("failed to create import blob: %v", err)
+		return "", fmt.Errorf("failed to encrypt challenge")
 	}
-	importBlob.String()
-	blobJSON :=
-	return encryptedData, nil
+
+	importBlobToSend := ImportBlobTransmitted{
+		Duplicate:     base64.StdEncoding.EncodeToString(importBlob.Duplicate),
+		EncryptedSeed: base64.StdEncoding.EncodeToString(importBlob.EncryptedSeed),
+		PublicArea:    base64.StdEncoding.EncodeToString(importBlob.PublicArea),
+	}
+
+	importBlobToSendJSON, err := json.Marshal(importBlobToSend)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal encrypted challenge")
+	}
+
+	return base64.StdEncoding.EncodeToString(importBlobToSendJSON), nil
 }
 
 // configureKubernetesClient initializes the Kubernetes client.
@@ -376,7 +392,7 @@ func workerRegistration(node *corev1.Node) {
 
 	// Prepare challenge payload for sending
 	workerChallenge := WorkerChallenge{
-		WorkerChallenge: base64.StdEncoding.EncodeToString(encryptedChallenge),
+		WorkerChallenge: encryptedChallenge,
 	}
 
 	// Send challenge request to the agent

@@ -148,7 +148,7 @@ func processAttestationRequestCRDEvent(event watch.Event) {
 		fmt.Printf(yellow.Sprintf("[%s] Attestation Request CRD Modified:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatCRD(event.Object)))
 
 	case watch.Deleted:
-		fmt.Printf(red.Sprintf("[%s] Attestation Request CRD Deleted:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatCRD(event.Object)))
+		fmt.Printf(yellow.Sprintf("[%s] Attestation Request CRD Deleted:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatCRD(event.Object)))
 
 	default:
 		fmt.Printf(red.Sprintf("[%s] Unknown event type: %v\n", time.Now().Format("02-01-2006 15:04:05"), event.Type))

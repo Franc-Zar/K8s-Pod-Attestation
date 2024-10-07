@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"github.com/gogo/protobuf/proto"
 	"github.com/google/go-tpm-tools/client"
 	pb "github.com/google/go-tpm-tools/proto/tpm"
 	"github.com/google/go-tpm-tools/server"
@@ -24,7 +23,6 @@ type ImportBlobJSON struct {
 	Duplicate     string `json:"duplicate"`
 	EncryptedSeed string `json:"encrypted_seed"`
 	PublicArea    string `json:"public_area"`
-	Pcrs          string `json:"pcrs"`
 }
 
 func main() {
@@ -69,22 +67,63 @@ func main() {
 	if string(decryptedData) == "secret challenge" {
 		log.Printf("------ Successfully decrypted challenge using EK: %s --------", string(decryptedData))
 	}
-
 }
 
 // Encrypts data with the provided public key derived from the ephemeral key (EK)
-func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) string {
+func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) ImportBlobJSON {
+	// Create the ImportBlob using the public EK
 	importBlob, err := server.CreateImportBlob(publicEK, plaintext, nil)
 	if err != nil {
 		log.Fatalf("failed to create import blob: %v", err)
 	}
-	data, err := proto.Marshal(importBlob)
-	if err != nil {
-		log.Fatalf("marshaling error: ", err)
+
+	jsonResult := ImportBlobJSON{
+		Duplicate:     base64.StdEncoding.EncodeToString(importBlob.Duplicate),
+		EncryptedSeed: base64.StdEncoding.EncodeToString(importBlob.EncryptedSeed),
+		PublicArea:    base64.StdEncoding.EncodeToString(importBlob.PublicArea),
 	}
 
-	encodedChallenge := base64.StdEncoding.EncodeToString(data)
-	return encodedChallenge
+	return jsonResult
+}
+
+func decryptWithEK(rwc io.ReadWriter, encryptedData ImportBlobJSON) []byte {
+	// Base64 decode the received data
+	duplicate, err := base64.StdEncoding.DecodeString(encryptedData.Duplicate)
+	if err != nil {
+		log.Fatalf("error decoding base64 data: %v", err)
+	}
+
+	encryptedSeed, err := base64.StdEncoding.DecodeString(encryptedData.EncryptedSeed)
+	if err != nil {
+		log.Fatalf("error decoding base64 data: %v", err)
+	}
+
+	publicArea, err := base64.StdEncoding.DecodeString(encryptedData.PublicArea)
+	if err != nil {
+		log.Fatalf("error decoding base64 data: %v", err)
+	}
+
+	blob := &pb.ImportBlob{
+		Duplicate:     duplicate,
+		EncryptedSeed: encryptedSeed,
+		PublicArea:    publicArea,
+		Pcrs:          nil,
+	}
+
+	// Retrieve the TPM's endorsement key (EK)
+	ek, err := client.EndorsementKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
+	}
+	defer ek.Close()
+
+	// Decrypt the ImportBlob using the TPM EK
+	output, err := ek.Import(blob)
+	if err != nil {
+		log.Fatalf("failed to import blob: %v", err)
+	}
+
+	return output
 }
 
 func signDataWithAK(ekHandle tpmutil.Handle, message string, rwc io.ReadWriter) string {
@@ -99,30 +138,6 @@ func signDataWithAK(ekHandle tpmutil.Handle, message string, rwc io.ReadWriter) 
 
 	signatureB64 := base64.StdEncoding.EncodeToString(AKsignedData)
 	return signatureB64
-}
-
-func decryptWithEK(rwc io.ReadWriter, encryptedData string) []byte {
-	decodedData, err := base64.StdEncoding.DecodeString(encryptedData)
-	if err != nil {
-		log.Fatalf("Error decoding data: %v", err)
-	}
-
-	blob := &pb.ImportBlob{}
-	err = proto.Unmarshal(decodedData, blob)
-	if err != nil {
-		log.Fatalf("Failed to retrieve Blob: %v", err)
-	}
-
-	ek, err := client.EndorsementKeyRSA(rwc)
-	if err != nil {
-		log.Fatalf("ERROR:  could not get EndorsementKeyRSA: %v", err)
-	}
-	defer ek.Close()
-	output, err := ek.Import(blob)
-	if err != nil {
-		log.Fatalf("failed to import blob: %v", err)
-	}
-	return output
 }
 
 func verifySignature(rsaPubKey *rsa.PublicKey, message, signature string) {

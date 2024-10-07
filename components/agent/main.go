@@ -14,7 +14,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-tpm-tools/client"
-	"github.com/google/go-tpm-tools/proto/tpm"
+	pb "github.com/google/go-tpm-tools/proto/tpm"
+	"github.com/google/go-tpm-tools/simulator"
 	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 	"github.com/google/uuid"
@@ -25,6 +26,12 @@ import (
 	"strings"
 	"time"
 )
+
+type ImportBlobTransmitted struct {
+	Duplicate     string `json:"duplicate"`
+	EncryptedSeed string `json:"encrypted_seed"`
+	PublicArea    string `json:"public_area"`
+}
 
 type AttestationRequest struct {
 	Nonce     string `json:"nonce"`
@@ -66,8 +73,6 @@ r5CVeqp2BrstdZtrWVRuQAKip9c7hl+mHODkE5yb0InHyRe5WWr5P7wtXtAPM6SO
 mFe/c/Cma1pM+702X6ULf0/BIMJkWzD3INdLtk8FE8rIxrrMSnDtmWw9BgGdsDgk
 pQIDAQAB
 -----END PUBLIC KEY-----`
-	privateAIK crypto.PrivateKey
-	privateEK  crypto.PrivateKey
 )
 
 var (
@@ -132,21 +137,20 @@ func getWorkerEKandCertificate() (crypto.PublicKey, string, error) {
 		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
 	}
 	defer EK.Close()
-
-	EKCert := EK.Cert()
-	pemEKCert := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: EKCert.Raw,
-	})
-
+	/*
+		EKCert := EK.Cert()
+		pemEKCert := pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: EKCert.Raw,
+		})
+	*/
 	pemPublicEK := encodePublicKeyToPEM(EK.PublicKey())
 
-	return pemPublicEK, string(pemEKCert), nil
+	return pemPublicEK, "", nil
 }
 
-// Mock function to get AIK (Attestation Identity Key)
+// Function to create a new AIK (Attestation Identity Key) for the Agent
 func createWorkerAIK() (crypto.PublicKey, error) {
-	// TPM interactions TODO - for now, generate a mock RSA key pair
 	AIK, err := client.AttestationKeyRSA(rwc)
 	if err != nil {
 		log.Fatalf("ERROR: could not get AttestationKeyRSA: %v", err)
@@ -215,7 +219,7 @@ func getWorkerIdentifyingData(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"UUID": workerId, "EK": encodePublicKeyToPEM(workerEK), "AIK": encodePublicKeyToPEM(workerAIK)})
+	c.JSON(http.StatusOK, gin.H{"UUID": workerId, "EK": workerEK, "AIK": workerAIK})
 }
 
 // Utility function: Verify a signature using provided public key
@@ -285,16 +289,55 @@ func signWithAIK(message string) (string, error) {
 	return base64.StdEncoding.EncodeToString(AIKSignedData), nil
 }
 
-func decryptWithEK(encryptedData *tpm.ImportBlob) ([]byte, error) {
-	EK, err := client.EndorsementKeyRSA(rwc)
+func decryptWithEK(encryptedData string) ([]byte, error) {
+	decodedChallenge, err := base64.StdEncoding.DecodeString(encryptedData)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding challenge")
+	}
+
+	var importBlobTransmitted ImportBlobTransmitted
+	err = json.Unmarshal(decodedChallenge, &importBlobTransmitted)
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshaling challenge: %v", err)
+	}
+
+	// Base64 decode the received data
+	duplicate, err := base64.StdEncoding.DecodeString(importBlobTransmitted.Duplicate)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding base64 data: %v", err)
+	}
+
+	encryptedSeed, err := base64.StdEncoding.DecodeString(importBlobTransmitted.EncryptedSeed)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding base64 data: %v", err)
+	}
+
+	publicArea, err := base64.StdEncoding.DecodeString(importBlobTransmitted.PublicArea)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding base64 data: %v", err)
+	}
+
+	blob := &pb.ImportBlob{
+		Duplicate:     duplicate,
+		EncryptedSeed: encryptedSeed,
+		PublicArea:    publicArea,
+		Pcrs:          nil,
+	}
+
+	// Retrieve the TPM's endorsement key (EK)
+	ek, err := client.EndorsementKeyRSA(rwc)
 	if err != nil {
 		return nil, fmt.Errorf("ERROR: could not get EndorsementKeyRSA: %v", err)
 	}
-	defer EK.Close()
+	defer ek.Close()
 
-	decryptedData, err := EK.Import(encryptedData)
+	// Decrypt the ImportBlob using the TPM EK
+	output, err := ek.Import(blob)
+	if err != nil {
+		return nil, fmt.Errorf("failed to import blob: %v", err)
+	}
 
-	return decryptedData, nil
+	return output, nil
 }
 
 // Helper function to calculate the AIK digest (mock)
@@ -406,18 +449,8 @@ func challengeWorkerEK(c *gin.Context) {
 		return
 	}
 
-	// Decode the Base64-encoded challenge
-	encryptedChallenge, err := base64.StdEncoding.DecodeString(req.WorkerChallenge)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"message": "Invalid Base64 challenge",
-			"status":  "error",
-		})
-		return
-	}
-
 	// Decrypt the challenge using the mock private EK
-	decryptedData, err := decryptWithEK(encryptedChallenge)
+	decryptedData, err := decryptWithEK(req.WorkerChallenge)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": "Decryption failed",
@@ -470,12 +503,18 @@ func challengeWorkerEK(c *gin.Context) {
 		"status":  "success",
 		"HMAC":    base64.StdEncoding.EncodeToString(hmacValue),
 	})
+	return
 }
 
 func main() {
 	initializeColors()
 	loadEnvironmentVariables()
-	openTPM()
+	//openTPM()
+	var err error
+	rwc, err = simulator.GetWithFixedSeedInsecure(1073741825)
+	if err != nil {
+		log.Fatalf("can't open TPM: %v", err)
+	}
 
 	defer func() {
 		if err := rwc.Close(); err != nil {
@@ -492,7 +531,7 @@ func main() {
 
 	// Start the server
 	fmt.Printf(green.Sprintf("Agent is running on port: %s\n", agentPORT))
-	err := r.Run(":" + agentPORT)
+	err = r.Run(":" + agentPORT)
 	if err != nil {
 		log.Fatal("Error while starting Registrar server")
 	}
