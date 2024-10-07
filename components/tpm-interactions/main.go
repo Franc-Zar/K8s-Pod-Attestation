@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"github.com/google/go-tpm-tools/client"
@@ -60,13 +61,42 @@ func main() {
 	}
 	defer ekk.Close()
 	ciphertext := encryptWithEK(ekk.PublicKey().(*rsa.PublicKey), []byte("secret challenge"))
+
 	log.Printf("------ Decrypting challenge using EK --------")
-
 	decryptedData := decryptWithEK(rwc, ciphertext)
-
 	if string(decryptedData) == "secret challenge" {
 		log.Printf("------ Successfully decrypted challenge using EK: %s --------", string(decryptedData))
 	}
+
+	log.Printf("------ Attestation using AK --------")
+	attestationProcess(rwc, akHandle)
+
+}
+
+func attestationProcess(rwc io.ReadWriter, akHandle tpmutil.Handle) {
+	attestationNonce := []byte("attestation_nonce")
+	AK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), akHandle)
+	if err != nil {
+		log.Fatalf("ERROR:  could not get AttestationKeyRSA: %v", err)
+	}
+	defer AK.Close()
+	attestation, err := AK.Attest(client.AttestOpts{Nonce: attestationNonce})
+	if err != nil {
+		log.Fatalf("failed to attest: %v", err)
+	}
+
+	attestationJSON, err := json.Marshal(attestation)
+	if err != nil {
+		log.Fatalf("Failed to parse attestation result as json")
+	}
+
+	log.Printf("Attestation output: %s", attestationJSON)
+
+	state, err := server.VerifyAttestation(attestation, server.VerifyOpts{Nonce: attestationNonce, TrustedAKs: []crypto.PublicKey{AK.PublicKey()}})
+	if err != nil {
+		log.Fatalf("failed to read PCRs: %v", err)
+	}
+	fmt.Println(state)
 }
 
 // Encrypts data with the provided public key derived from the ephemeral key (EK)
@@ -126,8 +156,8 @@ func decryptWithEK(rwc io.ReadWriter, encryptedData ImportBlobJSON) []byte {
 	return output
 }
 
-func signDataWithAK(ekHandle tpmutil.Handle, message string, rwc io.ReadWriter) string {
-	AK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), ekHandle)
+func signDataWithAK(akHandle tpmutil.Handle, message string, rwc io.ReadWriter) string {
+	AK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), akHandle)
 	if err != nil {
 		log.Fatalf("ERROR:  could not get EndorsementKeyRSA: %v", err)
 	}
