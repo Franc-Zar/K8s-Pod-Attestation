@@ -12,7 +12,6 @@ import (
 	"github.com/google/go-tpm-tools/client"
 	pb "github.com/google/go-tpm-tools/proto/tpm"
 	"github.com/google/go-tpm-tools/server"
-	"github.com/google/go-tpm-tools/simulator"
 	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
 	_ "github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpmutil"
@@ -28,7 +27,7 @@ type ImportBlobJSON struct {
 
 func main() {
 
-	rwc, err := simulator.GetWithFixedSeedInsecure(1073741825) // tpmutil.OpenTPM("/dev/tpm0")
+	rwc, err := tpmutil.OpenTPM("/dev/tpm0") //simulator.GetWithFixedSeedInsecure(1073741825)
 	if err != nil {
 		log.Fatalf("can't open TPM: %v", err)
 	}
