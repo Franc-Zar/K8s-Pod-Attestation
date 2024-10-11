@@ -3,14 +3,12 @@ module main
 go 1.23.2
 
 require (
-	github.com/gogo/protobuf v1.3.2
-	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
-	github.com/golang/protobuf v1.5.2
 	github.com/google/go-tpm v0.9.1
 	github.com/google/go-tpm-tools v0.3.13-0.20230620182252-4639ecce2aba
 )
 
 require (
+	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/certificate-transparency-go v1.1.2 // indirect
 	github.com/google/go-attestation v0.4.4-0.20230613144338-a9b6eb1eb888 // indirect
 	github.com/google/go-sev-guest v0.6.1 // indirect

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -15,6 +16,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/fatih/color"
+	pb "github.com/google/go-tpm-tools/proto/tpm"
+	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
 	"io"
 	"io/ioutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +35,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -50,15 +56,39 @@ type RegistrarResponse struct {
 }
 
 type Evidence struct {
-	Nonce    string `json:"nonce"`
-	PodName  string `json:"podName"`
-	PodUID   string `json:"podUID"`
-	TenantId string `json:"tenantId"`
+	PodName     string `json:"podName"`
+	PodUID      string `json:"podUID"`
+	TenantId    string `json:"tenantId"`
+	WorkerQuote string `json:"workerQuote"`
+	WorkerIMA   string `json:"workerIMA"`
 }
 
 type AttestationResponse struct {
 	Evidence  Evidence `json:"evidence"`
 	Signature string   `json:"signature,omitempty"`
+}
+
+type InputQuote struct {
+	Quote  string `json:"quote"`
+	RawSig string `json:"raw_sig"`
+	PCRs   PCRSet `json:"pcrs"`
+}
+
+// PCRSet represents the PCR values and the hash algorithm used
+type PCRSet struct {
+	Hash int               `json:"hash"`
+	PCRs map[string]string `json:"pcrs"`
+}
+
+type IMAPodEntry struct {
+	FilePath string `json:"filePath"`
+	FileHash string `json:"fileHash"`
+}
+
+type PodWhitelistCheckRequest struct {
+	PodImageName string        `json:"podImageName"`
+	PodFiles     []IMAPodEntry `json:"podFiles"`
+	HashAlg      string        `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 // Color variables for output
@@ -73,6 +103,8 @@ var (
 	registrarPORT        string
 	agentPORT            string
 	attestationNamespace string
+	whitelistHOST        string
+	whitelistPORT        string
 )
 
 // TEST PURPOSE
@@ -168,6 +200,8 @@ func loadEnvironmentVariables() {
 	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
 	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
+	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
+	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
@@ -389,27 +423,174 @@ func podAttestation(obj interface{}) {
 	}
 
 	// process Evidence
-	_, err = verifyAttestationSignature(workerName, string(evidenceJSON), attestationResponse.Signature)
+	_, err = verifyWorkerSignature(workerName, string(evidenceJSON), attestationResponse.Signature)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Evidence Signature Verification failed: %s\n", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
 		return
 	}
 
-	if attestationResponse.Evidence.Nonce != nonce {
-		fmt.Printf(red.Sprintf("[%s] Nonce match verification failed\n", time.Now().Format("02-01-2006 15:04:05")))
+	PCRDigest, hashAlg, err := validateWorkerQuote(workerName, attestationResponse.Evidence.WorkerQuote, nonce)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to validate Worker Quote: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
-	fmt.Printf(green.Sprintf("[%s] Received valid Attestation Response: %s\n", time.Now().Format("02-01-2006 15:04:05"), attestationResponse.Evidence))
+	IMAPodEntries, err := IMAAnalysis(attestationResponse.Evidence.WorkerIMA, PCRDigest, podUID)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to validate IMA measurement log: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return
+	}
+
+	podImageName, err := getPodImageNameByUID(podUID)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to get image of Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
+		return
+	}
+
+	podCheckRequest := PodWhitelistCheckRequest{
+		PodImageName: podImageName,
+		PodFiles:     IMAPodEntries,
+		HashAlg:      hashAlg,
+	}
+
+	err = verifyPodFilesIntegrity(podCheckRequest)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to verify integrity of files executed by Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
+		return
+	}
+
+	fmt.Printf(green.Sprintf("[%s] Attestation of Pod: %s succeeded\n", time.Now().Format("02-01-2006 15:04:05"), podName))
 	return
 }
 
+// getPodImageByUID retrieves the image of a pod given its UID
+func getPodImageNameByUID(podUID string) (string, error) {
+	// List all pods in the cluster (you may want to filter by namespace in production)
+	pods, err := clientset.CoreV1().Pods(attestationNamespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to list pods: %v", err)
+	}
+
+	// Iterate over the pods to find the one with the matching UID
+	for _, pod := range pods.Items {
+		if string(pod.UID) == podUID {
+			// If pod found, return the image of the first container (or modify to fit your need)
+			if len(pod.Spec.Containers) > 0 {
+				return pod.Spec.Containers[0].Image, nil
+			}
+			return "", fmt.Errorf("no containers found in pod with UID %s", podUID)
+		}
+	}
+	// If no pod is found with the given UID
+	return "", fmt.Errorf("no pod found with UID %s", podUID)
+}
+
+// extractSHADigest extracts the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
+func extractSHADigest(input string) (string, error) {
+	// Define a regular expression to match the prefix "sha<number>:"
+	re := regexp.MustCompile(`^sha[0-9]+:`)
+
+	if re.MatchString(input) {
+		// Remove the matching prefix and return the remaining part (hex digest)
+		return re.ReplaceAllString(input, ""), nil
+	}
+	return "", fmt.Errorf("input does not have a valid sha<algo>: prefix")
+}
+
+// IMAAnalysis checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software
+func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, error) {
+	// Step 1: Decode the base64-encoded IMA log
+	decodedLog, err := base64.StdEncoding.DecodeString(IMAMeasurementLog)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode IMA measurement log: %v", err)
+	}
+
+	// Step 2: Convert the decoded log to a string and split it into lines
+	logLines := strings.Split(string(decodedLog), "\n")
+
+	var IMAPodEntries []IMAPodEntry
+
+	// Step 3: Initialize the hash computation
+	hash := sha256.New()
+	initialHash := [32]byte{} // Initial zero hash
+	hash.Write(initialHash[:])
+
+	// Step 4: Iterate through each line and extract the second element
+	for _, IMALine := range logLines {
+		// Split the line by whitespace
+		IMAFields := strings.Fields(IMALine)
+		if len(IMAFields) < 7 {
+			return nil, fmt.Errorf("IMA measurement log integrity check failed: found entry not compliant with template")
+		}
+
+		// Decode the template hash field (second element)
+		templateHashField, err := hex.DecodeString(IMAFields[1])
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode a template hash field from IMA measurement log: %v", err)
+		}
+
+		// Extract the cgroup path (fifth element)
+		cgroupPathField := IMAFields[4]
+
+		// Check if the cgroup path contains the podUID
+		if checkPodUIDMatch(cgroupPathField, podUID) {
+			// Extract the file hash and file path (sixth and seventh elements)
+			fileHash, err := extractSHADigest(IMAFields[5])
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode file hash field: %v", err)
+			}
+			filePath := IMAFields[6]
+			IMAPodEntries = append(IMAPodEntries, IMAPodEntry{
+				FilePath: filePath,
+				FileHash: fileHash,
+			})
+		}
+
+		// Concatenate previous hash and the new element
+		previousHash := hash.Sum(nil)
+		dataToHash := append(previousHash, templateHashField...)
+
+		// Compute the new hash
+		hash.Reset() // Reset the hash to start fresh
+		hash.Write(dataToHash)
+	}
+
+	// Get the final computed hash
+	cumulativeHashIMA := hash.Sum(nil)
+
+	// Convert the final hash to a hex string for comparison
+	cumulativeHashIMAHex := hex.EncodeToString(cumulativeHashIMA)
+
+	// Compare the computed hash with the provided PCRDigest
+	// TODO delete node from cluster?
+	if cumulativeHashIMAHex != PCRDigest {
+		return nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match PCRDigest")
+	}
+
+	// Return the collected IMA pod entries
+	return IMAPodEntries, nil
+}
+
+func checkPodUIDMatch(path, podUID string) bool {
+	// Regex pattern for matching a UUID inside a string (case-insensitive)
+	regexPattern := fmt.Sprintf(`\/pod%s\/`, regexp.QuoteMeta(podUID))
+
+	// Compile the regex
+	r, err := regexp.Compile(regexPattern)
+	if err != nil {
+		fmt.Printf(red.Sprintf("Invalid Pod UID regex pattern: %v\n", err))
+		return false
+	}
+	// Check if the path contains the UUID
+	return r.MatchString(path)
+}
+
 // Verify the provided signature by contacting Registrar API
-func verifyAttestationSignature(workerName, evidence, signature string) (bool, error) {
+func verifyWorkerSignature(workerName, message, signature string) (bool, error) {
 	registrarURL := fmt.Sprintf("http://%s:%s/worker/verify", registrarHOST, registrarPORT)
 	payload := map[string]string{
 		"name":      workerName,
-		"message":   evidence,
+		"message":   message,
 		"signature": signature,
 	}
 
@@ -445,6 +626,192 @@ func verifyAttestationSignature(workerName, evidence, signature string) (bool, e
 
 	// Verify if the status and message indicate success
 	return registrarResp.Status == "success" && registrarResp.Message == "Signature verification successful", nil
+}
+
+func validateWorkerQuote(workerName, quoteJSON, nonce string) (string, string, error) {
+	// decode nonce from hex
+	nonceBytes, err := hex.DecodeString(nonce)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode ")
+	}
+
+	// Parse inputQuote JSON
+	var inputQuote InputQuote
+	err = json.Unmarshal([]byte(quoteJSON), &inputQuote)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to unmarshal Quote: %v", err)
+	}
+
+	// Decode Base64-encoded quote and signature
+	quoteBytes, err := base64.StdEncoding.DecodeString(inputQuote.Quote)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode Quote: %v", err)
+	}
+
+	// Decode Base64-encoded quote and signature
+	quoteSig, err := base64.StdEncoding.DecodeString(inputQuote.RawSig)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode Quote: %v", err)
+	}
+
+	sig, err := tpm2legacy.DecodeSignature(bytes.NewBuffer(quoteSig))
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode Quote Signature")
+	}
+
+	// Verify the signature
+	quoteSignatureIsValid, err := verifyWorkerSignature(workerName, string(quoteBytes), base64.StdEncoding.EncodeToString(sig.RSA.Signature))
+	if !quoteSignatureIsValid {
+		return "", "", fmt.Errorf("Quote Signature verification failed: %v", err)
+	}
+
+	// Decode and check for magic TPMS_GENERATED_VALUE.
+	attestationData, err := tpm2legacy.DecodeAttestationData(quoteBytes)
+	if err != nil {
+		return "", "", fmt.Errorf("Decoding Quote attestation data failed: %v", err)
+	}
+	if attestationData.Type != tpm2legacy.TagAttestQuote {
+		return "", "", fmt.Errorf("Expected quote tag, got: %v", attestationData.Type)
+	}
+	attestedQuoteInfo := attestationData.AttestedQuoteInfo
+	if attestedQuoteInfo == nil {
+		return "", "", fmt.Errorf("attestation data does not contain quote info")
+	}
+	if subtle.ConstantTimeCompare(attestationData.ExtraData, nonceBytes) == 0 {
+		return "", "", fmt.Errorf("Quote extraData %v did not match expected extraData %v", attestationData.ExtraData, nonceBytes)
+	}
+
+	inputPCRs, err := convertPCRs(inputQuote.PCRs.PCRs)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to convert PCRs from received Quote")
+	}
+
+	quotePCRs := &pb.PCRs{
+		Hash: pb.HashAlgo(inputQuote.PCRs.Hash),
+		Pcrs: inputPCRs,
+	}
+
+	PCRHashAlgo, err := convertToCryptoHash(quotePCRs.GetHash())
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to parse hash algorithm: %v", err)
+	}
+
+	err = validatePCRDigest(attestedQuoteInfo, quotePCRs, PCRHashAlgo)
+	if err != nil {
+		return "", "", fmt.Errorf("PCRs digest validation failed: %v", err)
+	}
+
+	return hex.EncodeToString(attestedQuoteInfo.PCRDigest), quotePCRs.GetHash().String(), nil
+}
+
+func convertToCryptoHash(algo pb.HashAlgo) (crypto.Hash, error) {
+	switch algo {
+	case 4:
+		return crypto.SHA1, nil
+	case 11:
+		return crypto.SHA256, nil
+	case 12:
+		return crypto.SHA384, nil
+	case 13:
+		return crypto.SHA512, nil
+	default:
+		return 0, fmt.Errorf("unsupported hash algorithm: %v", algo)
+	}
+}
+
+func convertPCRs(input map[string]string) (map[uint32][]byte, error) {
+	converted := make(map[uint32][]byte)
+
+	// Iterate over the input map
+	for key, value := range input {
+		// Convert string key to uint32
+		keyUint32, err := strconv.ParseUint(key, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert key '%s' to uint32: %v", key, err)
+		}
+
+		// Decode base64-encoded value
+		valueBytes, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode base64 value for key '%s': %v", key, err)
+		}
+
+		// Add the converted key-value pair to the new map
+		converted[uint32(keyUint32)] = valueBytes
+	}
+
+	return converted, nil
+}
+
+func validatePCRDigest(quoteInfo *tpm2legacy.QuoteInfo, pcrs *pb.PCRs, hash crypto.Hash) error {
+	if !SamePCRSelection(pcrs, quoteInfo.PCRSelection) {
+		return fmt.Errorf("given PCRs and Quote do not have the same PCR selection")
+	}
+	pcrDigest := PCRDigest(pcrs, hash)
+	if subtle.ConstantTimeCompare(quoteInfo.PCRDigest, pcrDigest) == 0 {
+		return fmt.Errorf("given PCRs digest not matching")
+	}
+	return nil
+}
+
+// PCRDigest computes the digest of the Pcrs. Note that the digest hash
+// algorithm may differ from the PCRs' hash (which denotes the PCR bank).
+func PCRDigest(p *pb.PCRs, hashAlg crypto.Hash) []byte {
+	hash := hashAlg.New()
+	for i := uint32(0); i < 24; i++ {
+		if pcrValue, exists := p.GetPcrs()[i]; exists {
+			hash.Write(pcrValue)
+		}
+	}
+	return hash.Sum(nil)
+}
+
+// SamePCRSelection checks if the Pcrs has the same PCRSelection as the
+// provided given tpm2.PCRSelection (including the hash algorithm).
+func SamePCRSelection(p *pb.PCRs, sel tpm2legacy.PCRSelection) bool {
+	if tpm2legacy.Algorithm(p.GetHash()) != sel.Hash {
+		return false
+	}
+	if len(p.GetPcrs()) != len(sel.PCRs) {
+		return false
+	}
+	for _, pcr := range sel.PCRs {
+		if _, ok := p.Pcrs[uint32(pcr)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func verifyPodFilesIntegrity(checkRequest PodWhitelistCheckRequest) error {
+	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/pod/check", whitelistHOST, whitelistPORT)
+
+	// Marshal the attestation request to JSON
+	jsonPayload, err := json.Marshal(checkRequest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Whitelist check request: %v", err)
+	}
+
+	// Make the POST request to the agent
+	resp, err := http.Post(whitelistProviderWorkerValidateURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to send Whitelist check request: %v", err)
+	}
+
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Whitelists Provider failed to process check request: %s (status: %d)", string(body), resp.StatusCode)
+	}
+
+	return nil
 }
 
 func sendAttestationRequestToAgent(agentIP, agentPort string, attestationRequest AttestationRequest) (AttestationResponse, error) {

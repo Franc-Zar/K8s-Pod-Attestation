@@ -16,15 +16,15 @@ import (
 	"github.com/google/go-tpm-tools/client"
 	pb "github.com/google/go-tpm-tools/proto/tpm"
 	"github.com/google/go-tpm-tools/simulator"
-	"github.com/google/go-tpm/legacy/tpm2"
+	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 	"github.com/google/uuid"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
-	"time"
 )
 
 type ImportBlobTransmitted struct {
@@ -42,10 +42,11 @@ type AttestationRequest struct {
 }
 
 type Evidence struct {
-	Nonce    string `json:"nonce"`
-	PodName  string `json:"podName"`
-	PodUID   string `json:"podUID"`
-	TenantId string `json:"tenantId"`
+	PodName     string `json:"podName"`
+	PodUID      string `json:"podUID"`
+	TenantId    string `json:"tenantId"`
+	WorkerQuote string `json:"workerQuote"`
+	WorkerIMA   string `json:"workerIMA"`
 }
 
 type AttestationResponse struct {
@@ -54,12 +55,13 @@ type AttestationResponse struct {
 }
 
 var (
-	red       *color.Color
-	green     *color.Color
-	yellow    *color.Color
-	agentPORT string
-	workerId  string
-	TPMPath   string
+	red                   *color.Color
+	green                 *color.Color
+	yellow                *color.Color
+	agentPORT             string
+	workerId              string
+	TPMPath               string
+	IMAMeasurementLogPath string
 )
 
 // TEST PURPOSE
@@ -81,31 +83,35 @@ var (
 )
 
 func openTPM() {
-	rwc, err := tpmutil.OpenTPM(TPMPath)
-	if err != nil {
-		fmt.Printf(red.Sprintf("can't open TPM: %v\n", err))
-		return
-	}
-	defer func() {
-		rwc.Close()
-	}()
+	var err error
 
+	if TPMPath == "simulator" {
+		rwc, err = simulator.GetWithFixedSeedInsecure(1073741825)
+		if err != nil {
+			fmt.Printf(red.Sprintf("can't open TPM: %v\n", err))
+			return
+		}
+	} else {
+		rwc, err = tpmutil.OpenTPM(TPMPath)
+		if err != nil {
+			log.Fatalf("can't open TPM: %v\n", err)
+			return
+		}
+	}
 	return
 }
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
 	agentPORT = getEnv("AGENT_PORT", "8083")
-	TPMPath = getEnv("TPM_PATH", "/dev/tpm0")
+	TPMPath = getEnv("TPM_PATH", "simulator")
+	IMAMeasurementLogPath = getEnv("IMA_PATH", "/root/ascii_runtime_measurements")
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		if key == "attestation_namespace" {
-			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
-		}
 		return defaultValue
 	}
 	return value
@@ -123,7 +129,7 @@ func getWorkerPublicAIK() (crypto.PublicKey, error) {
 		return nil, fmt.Errorf("AIK is not already created")
 	}
 
-	retrievedAK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.AKTemplateRSA(), AIKHandle)
+	retrievedAK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), AIKHandle)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to retrieve AIK from TPM")
 	}
@@ -137,16 +143,23 @@ func getWorkerEKandCertificate() (crypto.PublicKey, string, error) {
 		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
 	}
 	defer EK.Close()
-	/*
-		EKCert := EK.Cert()
-		pemEKCert := pem.EncodeToMemory(&pem.Block{
+	var pemEKCert []byte
+
+	EKCert := EK.Cert()
+	if EKCert != nil {
+		pemEKCert = pem.EncodeToMemory(&pem.Block{
 			Type:  "CERTIFICATE",
 			Bytes: EKCert.Raw,
 		})
-	*/
+	}
+
+	if pemEKCert == nil {
+		pemEKCert = []byte("EK Certificate not provided")
+	}
+
 	pemPublicEK := encodePublicKeyToPEM(EK.PublicKey())
 
-	return pemPublicEK, "", nil
+	return pemPublicEK, string(pemEKCert), nil
 }
 
 // Function to create a new AIK (Attestation Identity Key) for the Agent
@@ -167,25 +180,29 @@ func createWorkerAIK() (crypto.PublicKey, error) {
 }
 
 // extract AIKDigest and ephemeral Key from received challenge
-func extractChallengeElements(challenge string) (string, []byte, error) {
+func extractChallengeElements(challenge string) (string, []byte, []byte, error) {
 	var err error
-	parts := strings.Split(challenge, "::")
-	if len(parts) != 2 {
-		return "", nil, fmt.Errorf("malformed challenge: %v", err)
+	challengeElements := strings.Split(challenge, "::")
+	if len(challengeElements) != 3 {
+		return "", nil, nil, fmt.Errorf("malformed challenge: %v", err)
 	}
 
-	AIKDigest := parts[0]
+	AIKDigest := challengeElements[0]
 	_, err = hex.DecodeString(AIKDigest)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to decode AIKDigest as hexadecimal: %v", err)
+		return "", nil, nil, fmt.Errorf("failed to decode AIKDigest as hexadecimal: %v", err)
 	}
 
-	ephemeralKey, err := base64.StdEncoding.DecodeString(parts[1])
+	ephemeralKey, err := base64.StdEncoding.DecodeString(challengeElements[1])
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to decode ephemeral Key: %v", err)
+		return "", nil, nil, fmt.Errorf("failed to decode ephemeral Key: %v", err)
 	}
 
-	return AIKDigest, ephemeralKey, nil
+	nonce, err := hex.DecodeString(challengeElements[2])
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to decode nonce: %v", err)
+	}
+	return AIKDigest, ephemeralKey, nonce, nil
 }
 
 // Helper function to encode the public key to PEM format (for printing)
@@ -205,8 +222,7 @@ func getWorkerIdentifyingData(c *gin.Context) {
 	workerId = uuid.New().String()
 
 	// TODO send ek certificate to be validated _
-	workerEK, _, err := getWorkerEKandCertificate()
-
+	workerEK, EKCert, err := getWorkerEKandCertificate()
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"message": err.Error(), "status": "error"})
 		return
@@ -219,7 +235,7 @@ func getWorkerIdentifyingData(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"UUID": workerId, "EK": workerEK, "AIK": workerAIK})
+	c.JSON(http.StatusOK, gin.H{"UUID": workerId, "EK": workerEK, "EKCert": EKCert, "AIK": workerAIK})
 }
 
 // Utility function: Verify a signature using provided public key
@@ -275,7 +291,7 @@ func signWithAIK(message string) (string, error) {
 		return "", fmt.Errorf("AIK is not already created")
 	}
 
-	AIK, err := client.NewCachedKey(rwc, tpm2.HandleOwner, client.AKTemplateRSA(), AIKHandle)
+	AIK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), AIKHandle)
 	if err != nil {
 		return "", fmt.Errorf("Failed to retrieve AIK from TPM")
 	}
@@ -341,7 +357,7 @@ func decryptWithEK(encryptedData string) ([]byte, error) {
 }
 
 // Helper function to calculate the AIK digest (mock)
-func calculateAIKDigest(AIKPublicKey crypto.PublicKey) (string, error) {
+func computeAIKDigest(AIKPublicKey crypto.PublicKey) (string, error) {
 	// Calculate the digest of the mock AIK (using SHA-256 hash)
 	AIKBytes, err := x509.MarshalPKIXPublicKey(AIKPublicKey)
 	if err != nil {
@@ -389,6 +405,34 @@ func podAttestation(c *gin.Context) {
 	err = verifySignature(verifierPublicKey, string(receivedAttestationRequestJSON), attestationRequest.Signature)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
+			"message": "Attestation Request Signature verification failed",
+			"status":  "error",
+		})
+		return
+	}
+
+	nonceBytes, err := hex.DecodeString(attestationRequest.Nonce)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"message": "Failed to decode nonce",
+			"status":  "error",
+		})
+		return
+	}
+
+	PCRsToQuote := []int{10}
+	workerQuoteJSON, err := quoteGeneralPurposePCRs(nonceBytes, PCRsToQuote)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"message": err.Error(),
+			"status":  "error",
+		})
+		return
+	}
+
+	workerIMA, err := getWorkerIMAMeasurementLog()
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": err.Error(),
 			"status":  "error",
 		})
@@ -396,11 +440,12 @@ func podAttestation(c *gin.Context) {
 	}
 
 	// TODO collect claims and generate Evidence
-	evidence := Evidence{
-		Nonce:    attestationRequest.Nonce,
-		PodName:  attestationRequest.PodName,
-		PodUID:   attestationRequest.PodUID,
-		TenantId: attestationRequest.TenantId,
+	evidence := Evidence {
+		PodName:     attestationRequest.PodName,
+		PodUID:      attestationRequest.PodUID,
+		TenantId:    attestationRequest.TenantId,
+		WorkerQuote: workerQuoteJSON,
+		WorkerIMA:   workerIMA,
 	}
 
 	evidenceJSON, err := json.Marshal(evidence)
@@ -434,6 +479,94 @@ func podAttestation(c *gin.Context) {
 	return
 }
 
+func getWorkerIMAMeasurementLog() (string, error) {
+	// Open the file
+	IMAMeasurementLog, err := os.Open(IMAMeasurementLogPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open IMA measurement log: %v", err)
+	}
+	defer IMAMeasurementLog.Close()
+
+	// Read the file content
+	fileContent, err := io.ReadAll(IMAMeasurementLog)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %v", err)
+	}
+
+	// Encode the file content into Base64
+	base64Encoded := base64.StdEncoding.EncodeToString(fileContent)
+
+	return base64Encoded, nil
+}
+
+// Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs
+// and returns the boolean and the list of matching PCRs
+func containsAndReturnPCR(PCRstoQuote []int, bootReservedPCRs []int) (bool, []int) {
+	var foundPCRs []int
+	for _, pcr := range PCRstoQuote {
+		if slices.Contains(bootReservedPCRs, pcr) {
+			foundPCRs = append(foundPCRs, pcr)
+		}
+	}
+	if len(foundPCRs) == 0 {
+		return false, nil // No matching PCRs found
+	}
+	return true, foundPCRs
+}
+
+func quoteGeneralPurposePCRs(nonce []byte, PCRsToQuote []int) (string, error) {
+	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7}
+	// Custom function to return both found status and the PCR value
+	PCRsContainsBootReserved, foundPCR := containsAndReturnPCR(PCRsToQuote, bootReservedPCRs)
+	if PCRsContainsBootReserved {
+		return "", fmt.Errorf("Cannot compute quote on provided PCR set %v: boot reserved PCRs where included %v", foundPCR, bootReservedPCRs)
+	}
+
+	generalPurposePCRs := tpm2legacy.PCRSelection{
+		Hash: tpm2legacy.AlgSHA256,
+		PCRs: PCRsToQuote,
+	}
+
+	AIK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), AIKHandle)
+	if err != nil {
+		return "", fmt.Errorf("Error while retrieving AIK: %v", err)
+	}
+
+	quote, err := AIK.Quote(generalPurposePCRs, nonce)
+	if err != nil {
+		return "", fmt.Errorf("failed to create quote over PCRs %v: %v", PCRsToQuote, err)
+	}
+	quoteJSON, err := json.Marshal(quote)
+	if err != nil {
+		return "", fmt.Errorf("Failed to parse quote result as json: %v", err)
+	}
+	return string(quoteJSON), nil
+}
+
+func quoteBootAggregate(nonce []byte) (string, error) {
+	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7}
+
+	bootPCRs := tpm2legacy.PCRSelection{
+		Hash: tpm2legacy.AlgSHA256,
+		PCRs: bootReservedPCRs,
+	}
+
+	AIK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), AIKHandle)
+	if err != nil {
+		return "", fmt.Errorf("Error while retrieving AIK: %v", err)
+	}
+
+	quote, err := AIK.Quote(bootPCRs, nonce)
+	if err != nil {
+		return "", fmt.Errorf("failed to create quote over PCRs 0-7: %v", err)
+	}
+	quoteJSON, err := json.Marshal(quote)
+	if err != nil {
+		return "", fmt.Errorf("Failed to parse quote result as json: %v", err)
+	}
+	return string(quoteJSON), nil
+}
+
 func challengeWorkerEK(c *gin.Context) {
 	// Define a struct to bind the incoming JSON request
 	var req struct {
@@ -459,7 +592,7 @@ func challengeWorkerEK(c *gin.Context) {
 		return
 	}
 
-	receivedAIKDigest, receivedEphemeralKey, err := extractChallengeElements(string(decryptedData))
+	receivedAIKDigest, receivedEphemeralKey, nonce, err := extractChallengeElements(string(decryptedData))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"message": "Malformed challenge",
@@ -478,10 +611,19 @@ func challengeWorkerEK(c *gin.Context) {
 	}
 
 	// Calculate the mock AIK digest
-	expectedAIKDigest, err := calculateAIKDigest(retrievedAIKPublicKey)
+	expectedAIKDigest, err := computeAIKDigest(retrievedAIKPublicKey)
 	if err != nil || receivedAIKDigest != expectedAIKDigest {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": "AIK digest verification failed",
+			"status":  "error",
+		})
+		return
+	}
+
+	bootQuoteJSON, err := quoteBootAggregate(nonce)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "Error while computing Boot Aggregate quote",
 			"status":  "error",
 		})
 		return
@@ -499,9 +641,10 @@ func challengeWorkerEK(c *gin.Context) {
 
 	// Respond with success, including the HMAC of the UUID
 	c.JSON(http.StatusOK, gin.H{
-		"message": "WorkerChallenge decrypted and verified successfully",
-		"status":  "success",
-		"HMAC":    base64.StdEncoding.EncodeToString(hmacValue),
+		"message":         "WorkerChallenge decrypted and verified successfully",
+		"status":          "success",
+		"HMAC":            base64.StdEncoding.EncodeToString(hmacValue),
+		"workerBootQuote": bootQuoteJSON,
 	})
 	return
 }
@@ -509,18 +652,16 @@ func challengeWorkerEK(c *gin.Context) {
 func main() {
 	initializeColors()
 	loadEnvironmentVariables()
-	//openTPM()
-	var err error
-	rwc, err = simulator.GetWithFixedSeedInsecure(1073741825)
-	if err != nil {
-		log.Fatalf("can't open TPM: %v", err)
-	}
+	openTPM()
 
 	defer func() {
-		if err := rwc.Close(); err != nil {
-			log.Fatalf("\ncan't close TPM: %v", err)
+		err := rwc.Close()
+		if err != nil {
+			fmt.Printf(red.Sprintf("can't close TPM: %v\n", err))
+			return
 		}
 	}()
+
 	// Initialize Gin router
 	r := gin.Default()
 
@@ -531,7 +672,7 @@ func main() {
 
 	// Start the server
 	fmt.Printf(green.Sprintf("Agent is running on port: %s\n", agentPORT))
-	err = r.Run(":" + agentPORT)
+	err := r.Run(":" + agentPORT)
 	if err != nil {
 		log.Fatal("Error while starting Registrar server")
 	}

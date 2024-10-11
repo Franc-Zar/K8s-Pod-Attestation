@@ -6,6 +6,7 @@ toolchain go1.22.2
 
 require (
 	github.com/fatih/color v1.16.0
+	github.com/google/go-tpm v0.9.1
 	k8s.io/apimachinery v0.30.0
 	k8s.io/client-go v0.30.0
 )

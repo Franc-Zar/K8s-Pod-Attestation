@@ -3,18 +3,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"github.com/fatih/color"
+	pb "github.com/google/go-tpm-tools/proto/tpm"
 	"github.com/google/go-tpm-tools/server"
+	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/tpmutil"
 	"io"
 	"io/ioutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -25,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,9 +52,10 @@ type WorkerNode struct {
 }
 
 type WorkerResponse struct {
-	UUID string `json:"UUID"`
-	EK   string `json:"EK"`
-	AIK  string `json:"AIK"`
+	UUID   string `json:"UUID"`
+	EK     string `json:"EK"`
+	EKCert string `json:"EKCert"`
+	AIK    string `json:"AIK"`
 }
 
 type NewWorkerResponse struct {
@@ -60,16 +68,35 @@ type WorkerChallenge struct {
 	WorkerChallenge string `json:"workerChallenge"`
 }
 
-type ChallengeResponse struct {
-	Message string `json:"message"`
-	Status  string `json:"status"`
-	HMAC    string `json:"HMAC"`
+type WorkerChallengeResponse struct {
+	Message         string `json:"message"`
+	Status          string `json:"status"`
+	HMAC            string `json:"HMAC"`
+	WorkerBootQuote string `json:"workerBootQuote"`
 }
 
 type ImportBlobTransmitted struct {
 	Duplicate     string `json:"duplicate"`
 	EncryptedSeed string `json:"encrypted_seed"`
 	PublicArea    string `json:"public_area"`
+}
+
+type InputQuote struct {
+	Quote  string `json:"quote"`
+	RawSig string `json:"raw_sig"`
+	PCRs   PCRSet `json:"pcrs"`
+}
+
+// PCRSet represents the PCR values and the hash algorithm used
+type PCRSet struct {
+	Hash int               `json:"hash"`
+	PCRs map[string]string `json:"pcrs"`
+}
+
+type WorkerWhitelistCheckRequest struct {
+	OsName        string `json:"osName"`
+	BootAggregate string `json:"bootAggregate"`
+	HashAlg       string `json:"hashAlg"`
 }
 
 // Color variables for output
@@ -84,6 +111,8 @@ var (
 	registrarHOST        string
 	agentHOST            string
 	agentPORT            string
+	whitelistHOST        string
+	whitelistPORT        string
 )
 
 // initializeColors sets up color variables for console output.
@@ -98,8 +127,10 @@ func loadEnvironmentVariables() {
 	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
 	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
-	agentHOST = getEnv("AGENT_HOST", "10.0.2.8")
+	agentHOST = getEnv("AGENT_HOST", "10.0.2.13")
 	agentPORT = getEnv("AGENT_PORT", "30000")
+	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
+	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
@@ -203,21 +234,29 @@ func nodeIsRegistered(nodeName string) bool {
 	return true
 }
 
+// deleteNode deletes the node from the Kubernetes cluster.
+func deleteNodeFromCluster(nodeName string) error {
+	err := clientset.CoreV1().Nodes().Delete(context.TODO(), nodeName, v1.DeleteOptions{})
+	return err
+}
+
 // Handle events for nodes
 func handleNodeEvent(event watch.Event, node *corev1.Node) {
 	switch event.Type {
 	case watch.Added:
 		if !nodeIsControlPlane(node) && !nodeIsRegistered(node.Name) {
 			fmt.Printf(green.Sprintf("[%s] Worker node %s joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
-			workerRegistration(node)
-			createAgentCRDInstance(node.Name)
+			if !workerRegistration(node) {
+				if deleteNodeFromCluster(node.Name) != nil {
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node %s the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+				}
+			}
 		}
 
 	case watch.Deleted:
 		if !nodeIsControlPlane(node) {
 			fmt.Printf(yellow.Sprintf("[%s] Worker node %s deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 			workerRemoval(node)
-			deleteAgentCRDInstance(node.Name)
 		}
 	}
 }
@@ -290,7 +329,7 @@ func workerRemoval(node *corev1.Node) {
 	// Create a new HTTP request
 	req, err := http.NewRequest(http.MethodDelete, registrarWorkerDeletionURL, nil)
 	if err != nil {
-		fmt.Printf("Error creating request: %v\n", err)
+		fmt.Printf(red.Sprintf("Error creating Worker removal request: %v\n", err))
 		return
 	}
 
@@ -298,18 +337,19 @@ func workerRemoval(node *corev1.Node) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("Error sending request: %v\n", err)
+		fmt.Printf(red.Sprintf("Error sending Worker removal request: %v\n", err))
 		return
 	}
 	defer resp.Body.Close()
 
 	// Check the response status
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Failed to delete worker: received status code %d\n", resp.StatusCode)
+		fmt.Printf(red.Sprintf("Failed to delete Worker: received status code %d\n", resp.StatusCode))
 		return
 	}
 
-	fmt.Printf(yellow.Sprintf("Worker Node: %s removed with success\n", node.GetName()))
+	fmt.Printf(yellow.Sprintf("[%s] Worker Node: %s removed with success\n", time.Now().Format("02-01-2006 15:04:05"), node.GetName()))
+	deleteAgentCRDInstance(node.Name)
 }
 
 func waitForAgent(retryInterval, timeout time.Duration) error {
@@ -335,8 +375,22 @@ func waitForAgent(retryInterval, timeout time.Duration) error {
 	}
 }
 
+// generateNonce creates a random nonce of specified byte length
+func generateNonce(size int) (string, error) {
+	nonce := make([]byte, size)
+
+	// Fill the byte slice with random data
+	_, err := rand.Read(nonce)
+	if err != nil {
+		return "", fmt.Errorf("error generating nonce: %v", err)
+	}
+
+	// Return the nonce as a hexadecimal string
+	return hex.EncodeToString(nonce), nil
+}
+
 // workerRegistration registers the worker node by calling the identification API
-func workerRegistration(node *corev1.Node) {
+func workerRegistration(node *corev1.Node) bool {
 	agentIdentifyURL := fmt.Sprintf("http://%s:%s/agent/worker/identify", agentHOST, agentPORT)
 	agentChallengeNodeURL := fmt.Sprintf("http://%s:%s/agent/worker/challenge", agentHOST, agentPORT)
 	registrarWorkerCreationURL := fmt.Sprintf("http://%s:%s/worker/create", registrarHOST, registrarPORT)
@@ -344,50 +398,57 @@ func workerRegistration(node *corev1.Node) {
 	err := waitForAgent(5*time.Second, 1*time.Minute)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while contacting Agent: %v\n", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
+		return false
 	}
 
 	// Call Agent to identify worker data
 	workerData, err := callAgentIdentify(agentIdentifyURL)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to call Agent API: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	// Decode EK and AIK
 	EK, err := decodePublicKeyFromPEM(workerData.EK)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to parse EK from PEM: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	AIK, err := decodePublicKeyFromPEM(workerData.AIK)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to parse AIK from PEM: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	// Calculate AIK digest
 	aikDigest, err := calculateAIKDigest(AIK)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to calculate AIK digest: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	// Generate ephemeral key
 	ephemeralKey, err := generateEphemeralKey(32)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to generate ephemeral key: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
+	}
+
+	nonce, err := generateNonce(8)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to generate challenge nonce: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return false
 	}
 
 	// Construct worker challenge payload
-	challengePayload := fmt.Sprintf("%s::%s", aikDigest, base64.StdEncoding.EncodeToString(ephemeralKey))
+	challengePayload := fmt.Sprintf("%s::%s::%s", aikDigest, base64.StdEncoding.EncodeToString(ephemeralKey), nonce)
 
 	// Encrypt the WorkerChallengePayload with the EK public key
 	encryptedChallenge, err := encryptWithEK(EK, []byte(challengePayload))
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to encrypt challengePayload with EK: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	// Prepare challenge payload for sending
@@ -399,19 +460,37 @@ func workerRegistration(node *corev1.Node) {
 	challengeResponse, err := sendChallengeRequest(agentChallengeNodeURL, workerChallenge)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to send challenge request: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	decodedHMAC, err := base64.StdEncoding.DecodeString(challengeResponse.HMAC)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to decode HMAC: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	// Verify the HMAC response from the agent
 	if err := verifyHMAC([]byte(workerData.UUID), ephemeralKey, decodedHMAC); err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to verify HMAC: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
+	}
+
+	bootAggregate, hashAlg, err := validateWorkerQuote(challengeResponse.WorkerBootQuote, nonce, AIK)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to validate Worker Quote: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return false
+	}
+
+	workerWhitelistCheckRequest := WorkerWhitelistCheckRequest{
+		OsName:        node.Status.NodeInfo.OSImage,
+		BootAggregate: bootAggregate,
+		HashAlg:       hashAlg,
+	}
+
+	err = verifyBootAggregate(workerWhitelistCheckRequest)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Worker Boot validation failed: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return false
 	}
 
 	workerNode := WorkerNode{
@@ -424,10 +503,43 @@ func workerRegistration(node *corev1.Node) {
 	createWorkerResponse, err := createWorker(registrarWorkerCreationURL, &workerNode)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to create Worker Node: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return false
 	}
 
 	fmt.Printf(green.Sprintf("[%s] Successfully registered Worker Node: %s\n", time.Now().Format("02-01-2006 15:04:05"), createWorkerResponse.WorkerId))
+	createAgentCRDInstance(node.Name)
+	return true
+}
+
+func verifyBootAggregate(checkRequest WorkerWhitelistCheckRequest) error {
+	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/worker/check", whitelistHOST, whitelistPORT)
+
+	// Marshal the attestation request to JSON
+	jsonPayload, err := json.Marshal(checkRequest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Whitelist check request: %v", err)
+	}
+
+	// Make the POST request to the agent
+	resp, err := http.Post(whitelistProviderWorkerValidateURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to send Whitelist check request: %v", err)
+	}
+
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Whitelists Provider failed to process check request: %s (status: %d)", string(body), resp.StatusCode)
+	}
+
+	return nil
 }
 
 // Helper function to call the agent identification API
@@ -438,19 +550,185 @@ func callAgentIdentify(url string) (*WorkerResponse, error) {
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected response status: %s", resp.Status)
+		return nil, fmt.Errorf("Agent failed to process identification request: %s (status: %d)", string(body), resp.StatusCode)
 	}
 
 	var workerResponse WorkerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&workerResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
+	if err := json.Unmarshal(body, &workerResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode response: received %s: %v", string(body), err)
 	}
 	return &workerResponse, nil
 }
 
+func verifySignature(rsaPubKey *rsa.PublicKey, message []byte, signature tpmutil.U16Bytes) error {
+	hashed := sha256.Sum256(message)
+	err := rsa.VerifyPKCS1v15(rsaPubKey, crypto.SHA256, hashed[:], signature)
+	return err
+}
+
+func validateWorkerQuote(quoteJSON, nonce string, AIK *rsa.PublicKey) (string, string, error) {
+	// decode nonce from hex
+	nonceBytes, err := hex.DecodeString(nonce)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode ")
+	}
+
+	// Parse inputQuote JSON
+	var inputQuote InputQuote
+	err = json.Unmarshal([]byte(quoteJSON), &inputQuote)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to unmarshal Quote: %v", err)
+	}
+
+	// Decode Base64-encoded quote and signature
+	quoteBytes, err := base64.StdEncoding.DecodeString(inputQuote.Quote)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode Quote: %v", err)
+	}
+
+	// Decode Base64-encoded quote and signature
+	quoteSig, err := base64.StdEncoding.DecodeString(inputQuote.RawSig)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode Quote: %v", err)
+	}
+
+	sig, err := tpm2legacy.DecodeSignature(bytes.NewBuffer(quoteSig))
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode Quote Signature")
+	}
+
+	// Verify the signature
+	if verifySignature(AIK, quoteBytes, sig.RSA.Signature) != nil {
+		return "", "", fmt.Errorf("Quote Signature verification failed")
+	}
+
+	// Decode and check for magic TPMS_GENERATED_VALUE.
+	attestationData, err := tpm2legacy.DecodeAttestationData(quoteBytes)
+	if err != nil {
+		return "", "", fmt.Errorf("Decoding Quote attestation data failed: %v", err)
+	}
+	if attestationData.Type != tpm2legacy.TagAttestQuote {
+		return "", "", fmt.Errorf("Expected quote tag, got: %v", attestationData.Type)
+	}
+	attestedQuoteInfo := attestationData.AttestedQuoteInfo
+	if attestedQuoteInfo == nil {
+		return "", "", fmt.Errorf("attestation data does not contain quote info")
+	}
+	if subtle.ConstantTimeCompare(attestationData.ExtraData, nonceBytes) == 0 {
+		return "", "", fmt.Errorf("Quote extraData %v did not match expected extraData %v", attestationData.ExtraData, nonceBytes)
+	}
+
+	inputPCRs, err := convertPCRs(inputQuote.PCRs.PCRs)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to convert PCRs from received Quote")
+	}
+
+	quotePCRs := &pb.PCRs{
+		Hash: pb.HashAlgo(inputQuote.PCRs.Hash),
+		Pcrs: inputPCRs,
+	}
+
+	pcrHashAlgo, err := convertToCryptoHash(quotePCRs.GetHash())
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to parse hash algorithm: %v", err)
+	}
+
+	err = validatePCRDigest(attestedQuoteInfo, quotePCRs, pcrHashAlgo)
+	if err != nil {
+		return "", "", fmt.Errorf("PCRs digest validation failed: %v", err)
+	}
+
+	return hex.EncodeToString(attestedQuoteInfo.PCRDigest), quotePCRs.GetHash().String(), nil
+}
+
+func convertToCryptoHash(algo pb.HashAlgo) (crypto.Hash, error) {
+	switch algo {
+	case 4:
+		return crypto.SHA1, nil
+	case 11:
+		return crypto.SHA256, nil
+	case 12:
+		return crypto.SHA384, nil
+	case 13:
+		return crypto.SHA512, nil
+	default:
+		return 0, fmt.Errorf("unsupported hash algorithm: %v", algo)
+	}
+}
+
+func convertPCRs(input map[string]string) (map[uint32][]byte, error) {
+	converted := make(map[uint32][]byte)
+
+	// Iterate over the input map
+	for key, value := range input {
+		// Convert string key to uint32
+		keyUint32, err := strconv.ParseUint(key, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert key '%s' to uint32: %v", key, err)
+		}
+
+		// Decode base64-encoded value
+		valueBytes, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode base64 value for key '%s': %v", key, err)
+		}
+
+		// Add the converted key-value pair to the new map
+		converted[uint32(keyUint32)] = valueBytes
+	}
+
+	return converted, nil
+}
+
+func validatePCRDigest(quoteInfo *tpm2legacy.QuoteInfo, pcrs *pb.PCRs, hash crypto.Hash) error {
+	if !SamePCRSelection(pcrs, quoteInfo.PCRSelection) {
+		return fmt.Errorf("given PCRs and Quote do not have the same PCR selection")
+	}
+	pcrDigest := PCRDigest(pcrs, hash)
+	if subtle.ConstantTimeCompare(quoteInfo.PCRDigest, pcrDigest) == 0 {
+		return fmt.Errorf("given PCRs digest not matching")
+	}
+	return nil
+}
+
+// PCRDigest computes the digest of the Pcrs. Note that the digest hash
+// algorithm may differ from the PCRs' hash (which denotes the PCR bank).
+func PCRDigest(p *pb.PCRs, hashAlg crypto.Hash) []byte {
+	hash := hashAlg.New()
+	for i := uint32(0); i < 24; i++ {
+		if pcrValue, exists := p.GetPcrs()[i]; exists {
+			hash.Write(pcrValue)
+		}
+	}
+	return hash.Sum(nil)
+}
+
+// SamePCRSelection checks if the Pcrs has the same PCRSelection as the
+// provided given tpm2.PCRSelection (including the hash algorithm).
+func SamePCRSelection(p *pb.PCRs, sel tpm2legacy.PCRSelection) bool {
+	if tpm2legacy.Algorithm(p.GetHash()) != sel.Hash {
+		return false
+	}
+	if len(p.GetPcrs()) != len(sel.PCRs) {
+		return false
+	}
+	for _, pcr := range sel.PCRs {
+		if _, ok := p.Pcrs[uint32(pcr)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // Helper function to send the challenge request to the agent
-func sendChallengeRequest(url string, challenge WorkerChallenge) (*ChallengeResponse, error) {
+func sendChallengeRequest(url string, challenge WorkerChallenge) (*WorkerChallengeResponse, error) {
 	// Marshal the challenge struct into JSON
 	jsonData, err := json.Marshal(challenge)
 	if err != nil {
@@ -469,8 +747,8 @@ func sendChallengeRequest(url string, challenge WorkerChallenge) (*ChallengeResp
 		return nil, fmt.Errorf("unexpected response status: %s, response body: %s", resp.Status, string(bodyBytes))
 	}
 
-	// Decode the response JSON into the ChallengeResponse struct
-	var challengeResponse ChallengeResponse
+	// Decode the response JSON into the WorkerChallengeResponse struct
+	var challengeResponse WorkerChallengeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&challengeResponse); err != nil {
 		return nil, fmt.Errorf("failed to decode challenge response: %v", err)
 	}
@@ -480,7 +758,6 @@ func sendChallengeRequest(url string, challenge WorkerChallenge) (*ChallengeResp
 
 // Create a new worker in the registrar
 func createWorker(url string, workerNode *WorkerNode) (*NewWorkerResponse, error) {
-
 	jsonData, err := json.Marshal(workerNode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal worker data: %v", err)
@@ -565,7 +842,7 @@ func createAgentCRDInstance(nodeName string) {
 	// Create the Agent CRD instance in the kube-system namespace
 	_, err = dynamicClient.Resource(gvr).Namespace("kube-system").Create(context.TODO(), agent, v1.CreateOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error creating Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		fmt.Printf(yellow.Sprintf("[%s] Error creating Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
