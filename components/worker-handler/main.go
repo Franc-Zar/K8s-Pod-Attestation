@@ -512,7 +512,7 @@ func workerRegistration(node *corev1.Node) bool {
 }
 
 func verifyBootAggregate(checkRequest WorkerWhitelistCheckRequest) error {
-	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/worker/check", whitelistHOST, whitelistPORT)
+	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/worker/os/check", whitelistHOST, whitelistPORT)
 
 	// Marshal the attestation request to JSON
 	jsonPayload, err := json.Marshal(checkRequest)

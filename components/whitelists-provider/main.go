@@ -46,9 +46,10 @@ type IMAPodEntry struct {
 }
 
 type PodWhitelistCheckRequest struct {
-	PodImageName string        `json:"podImageName"`
-	PodFiles     []IMAPodEntry `json:"podFiles"`
-	HashAlg      string        `json:"hashAlg"` // Include the hash algorithm in the request
+	PodImageName   string        `json:"podImageName"`
+	PodImageDigest string        `json:"podImageDigest"`
+	PodFiles       []IMAPodEntry `json:"podFiles"`
+	HashAlg        string        `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 // MongoDB client and global variables
@@ -303,6 +304,11 @@ func checkPodWhitelist(c *gin.Context) {
 		return
 	}
 
+	if imageWhitelist.ImageDigest != checkRequest.PodImageDigest {
+		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Provided Pod image digest does not match stored image digest"})
+		return
+	}
+
 	// Iterate through the pod files to check if they match the stored whitelist
 	for _, podFile := range checkRequest.PodFiles {
 		found := false
@@ -403,13 +409,13 @@ func main() {
 	r := gin.Default()
 
 	// Worker whitelist
-	r.POST("/whitelist/worker/check", checkWorkerWhitelist)
-	r.POST("/whitelist/worker/add", appendToWorkerWhitelist)
-	r.DELETE("/whitelist/worker/delete", deleteFromWorkerWhitelist)
+	r.POST("/whitelist/worker/os/check", checkWorkerWhitelist)
+	r.POST("/whitelist/worker/os/add", appendToWorkerWhitelist)
+	r.DELETE("/whitelist/worker/os/delete", deleteFromWorkerWhitelist)
 	r.DELETE("/whitelist/worker/drop", dropWorkerWhitelist)
 
 	// Pod whitelist
-	r.POST("/whitelist/pod/check", checkPodWhitelist)
+	r.POST("/whitelist/pod/image/check", checkPodWhitelist)
 	r.POST("/whitelist/pod/image/add", appendNewImageToPodWhitelist)
 	r.POST("/whitelist/pod/image/file/add", appendFilesToExistingImageWhitelistByImageName)
 	r.DELETE("/whitelist/pod/image/file/delete", deleteFileOfImageFromPodWhitelist)

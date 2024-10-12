@@ -35,25 +35,50 @@ worker_data_to_append = {
 
 # Test data for storing a pod whitelist
 store_pod_data = {
-    "imageName": "nginx:1.21",
+    "imageName": "redis:latest",
     "imageDigest": "sha256:abcd1234",
     "validFiles": [
         {
-            "filePath": "/bin/sh",
+            "filePath": "/bin/busybox",
             "validDigests": {
                 "SHA1": [],
-                "SHA256": ["c157a79031e1c40f85931829bc5fc552"]
+                "SHA256": [
+                    "59c8d3cd7110e90abe309b4390afc803a9d40dccd48bdd01afbf2abbe6be4e34",
+                    "5eab7b965422f7d475bc10d2b2d74d2e399da904e94c08565eef333df800085f"
+                ]
             }
         },
         {
-            "filePath": "/bin/kmod",
+            "filePath": "/lib/ld-musl-x86_64.so.1",
             "validDigests": {
                 "SHA1": [],
-                "SHA256": ["b157a79031e1c40f85931829bc5fc452"]
+                "SHA256": [
+                    "6a1c33fa00fd34a8c6e3ee69767a6e35c96072cb239db6e30246af0695cfd6e0",
+                    "966253f07a0f352defe81bb9f77f5b2f0bc1bf5864b6f110a47cfcd521688021"
+                ]
+            }
+        },
+        {
+            "filePath": "/opt/bin/flanneld",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "7a7a8305290a02361c52e0aa168df8d4741bd7f882af421763675ae8f57894a2"
+                ]
+            }
+        },
+        {
+            "filePath": "/pause",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "11f8ea63fa5b85b1b0f77c8a794f6b2f196ece6aaa1b2d2a43bd72f9a4de98ff"
+                ]
             }
         }
     ]
 }
+
 
 # Test data for checking a pod whitelist
 check_pod_data = {
@@ -73,22 +98,17 @@ check_pod_data = {
 
 
 # Test function for adding a worker whitelist
-def add_worker_whitelist():
-    response = requests.post(f"{BASE_URL}/whitelist/worker/add", headers=headers, data=json.dumps(store_worker_data))
+def append_worker_whitelist():
+    response = requests.post(f"{BASE_URL}/whitelist/worker/os/add", headers=headers, data=json.dumps(store_worker_data))
     print("Add Worker Whitelist Response:", response.status_code, response.json())
 
 # Test function for checking a worker whitelist
 def check_worker_whitelist():
-    response = requests.post(f"{BASE_URL}/whitelist/worker/check", headers=headers, data=json.dumps(check_worker_data))
+    response = requests.post(f"{BASE_URL}/whitelist/worker/os/check", headers=headers, data=json.dumps(check_worker_data))
     print("Check Worker Whitelist Response:", response.status_code, response.json())
 
-# Test function for appending to a worker whitelist
-def append_worker_whitelist():
-    response = requests.post(f"{BASE_URL}/whitelist/worker/add", headers=headers, data=json.dumps(worker_data_to_append))
-    print("Append Worker Whitelist Response:", response.status_code, response.json())
-
 # Test function for adding a pod whitelist
-def add_pod_whitelist():
+def append_pod_whitelist():
     response = requests.post(f"{BASE_URL}/whitelist/pod/image/add", headers=headers, data=json.dumps(store_pod_data))
     print("Add Pod Whitelist Response:", response.status_code, response.json())
 
@@ -114,8 +134,8 @@ def delete_file_from_pod_whitelist(image_name, file_path):
 if __name__ == "__main__":
     #add_worker_whitelist()      # Test adding worker whitelist
     #check_worker_whitelist()    # Test checking worker whitelist
-    delete_os_from_worker_whitelist("Ubuntu 22.04.6 LTS")
+    #delete_os_from_worker_whitelist("Ubuntu 22.04.6 LTS")
     #append_worker_whitelist()   # Test appending new OS to worker whitelist
-    #add_pod_whitelist()         # Test adding pod whitelist
+    append_pod_whitelist()         # Test adding pod whitelist
     #check_pod_whitelist()       # Test checking pod whitelist
     #delete_file_from_pod_whitelist("nginx:1.21", "/bin/sh")  # Test deleting a file from pod whitelist

@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -166,6 +167,17 @@ func watchAttestationRequestCRDChanges(stopCh chan os.Signal) {
 			return
 		}
 	}
+}
+
+func getNodeContainerEngine(nodeName string) (string, error) {
+	// Get a list of nodes in the cluster
+	// Retrieve the Node information using the nodeName
+	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get node: %v", err)
+	}
+	containerEngine := node.Status.NodeInfo.ContainerRuntimeVersion
+	return containerEngine, nil
 }
 
 // processAttestationRequestCRDEvent handles different types of CRD events (Added, Modified, Deleted).
@@ -507,43 +519,49 @@ func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, er
 
 	// Step 2: Convert the decoded log to a string and split it into lines
 	logLines := strings.Split(string(decodedLog), "\n")
-
-	var IMAPodEntries []IMAPodEntry
+	uniqueEntries := make(map[string]IMAPodEntry)
 
 	// Step 3: Initialize the hash computation
 	hash := sha256.New()
 	initialHash := [32]byte{} // Initial zero hash
 	hash.Write(initialHash[:])
 
-	// Step 4: Iterate through each line and extract the second element
+	// Iterate through each line and extract relevant fields
 	for _, IMALine := range logLines {
 		// Split the line by whitespace
 		IMAFields := strings.Fields(IMALine)
 		if len(IMAFields) < 7 {
-			return nil, fmt.Errorf("IMA measurement log integrity check failed: found entry not compliant with template")
+			log.Fatalf("IMA measurement log integrity check failed: found entry not compliant with template: %s", IMALine)
 		}
 
-		// Decode the template hash field (second element)
-		templateHashField, err := hex.DecodeString(IMAFields[1])
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode a template hash field from IMA measurement log: %v", err)
-		}
-
-		// Extract the cgroup path (fifth element)
+		templateHashField := IMAFields[1]
+		depField := IMAFields[3]
 		cgroupPathField := IMAFields[4]
+
+		// check if entry belongs to container or host
+		if !strings.Contains(depField, "containerd") {
+			continue
+		}
 
 		// Check if the cgroup path contains the podUID
 		if checkPodUIDMatch(cgroupPathField, podUID) {
 			// Extract the file hash and file path (sixth and seventh elements)
 			fileHash, err := extractSHADigest(IMAFields[5])
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode file hash field: %v", err)
+				log.Fatalf("failed to decode file hash field: %v", err)
 			}
 			filePath := IMAFields[6]
-			IMAPodEntries = append(IMAPodEntries, IMAPodEntry{
-				FilePath: filePath,
-				FileHash: fileHash,
-			})
+
+			// Create a unique key by combining filePath and fileHash
+			entryKey := fmt.Sprintf("%s:%s", filePath, fileHash)
+
+			// Add the entry to the map if it doesn't exist
+			if _, exists := uniqueEntries[entryKey]; !exists {
+				uniqueEntries[entryKey] = IMAPodEntry{
+					FilePath: filePath,
+					FileHash: fileHash,
+				}
+			}
 		}
 
 		// Concatenate previous hash and the new element
@@ -567,21 +585,29 @@ func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, er
 		return nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match PCRDigest")
 	}
 
+	// Convert the unique entries back to a slice
+	IMAPodEntries := make([]IMAPodEntry, 0, len(uniqueEntries))
+	for _, entry := range uniqueEntries {
+		IMAPodEntries = append(IMAPodEntries, entry)
+	}
+
 	// Return the collected IMA pod entries
 	return IMAPodEntries, nil
 }
 
 func checkPodUIDMatch(path, podUID string) bool {
-	// Regex pattern for matching a UUID inside a string (case-insensitive)
-	regexPattern := fmt.Sprintf(`\/pod%s\/`, regexp.QuoteMeta(podUID))
+	var regexPattern string
+	// Replace dashes in podUID with underscores
+	adjustedPodUID := strings.ReplaceAll(podUID, "-", "_")
+	// Regex pattern to match the pod UID in the path
+	regexPattern = fmt.Sprintf(`kubepods[^\/]*-pod%s\.slice`, regexp.QuoteMeta(adjustedPodUID))
 
 	// Compile the regex
 	r, err := regexp.Compile(regexPattern)
 	if err != nil {
-		fmt.Printf(red.Sprintf("Invalid Pod UID regex pattern: %v\n", err))
 		return false
 	}
-	// Check if the path contains the UUID
+	// Check if the path contains the pod UID
 	return r.MatchString(path)
 }
 

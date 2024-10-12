@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/google/go-tpm-tools/client"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -204,9 +205,13 @@ func IMAAnalysys(podUID string) {
 		if len(IMAFields) < 7 {
 			log.Fatalf("IMA measurement log integrity check failed: found entry not compliant with template: %s", IMALine)
 		}
-
+		depField := IMAFields[3]
 		// Extract the cgroup path (fifth element)
 		cgroupPathField := IMAFields[4]
+
+		if !strings.Contains(depField, "containerd") {
+			continue
+		}
 
 		// Check if the cgroup path contains the podUID
 		if checkPodUIDMatch(cgroupPathField, podUID) {
@@ -242,14 +247,65 @@ func IMAAnalysys(podUID string) {
 		log.Fatalf(err.Error())
 	}
 	log.Printf(string(podEntriesJSON))
+
+	podWhitelistCheckRequest := PodWhitelistCheckRequest{
+		PodImageName: "redis:latest",
+		PodFiles:     IMAPodEntries,
+		HashAlg:      "SHA256",
+	}
+
+	resp := verifyPodFilesIntegrity(podWhitelistCheckRequest)
+
+	if resp != nil {
+		log.Fatalf("failed to verify integrity of pod files")
+	}
+	log.Printf("all files of Pod are allowed and respect the whitelist")
+}
+
+type PodWhitelistCheckRequest struct {
+	PodImageName string        `json:"podImageName"`
+	PodFiles     []IMAPodEntry `json:"podFiles"`
+	HashAlg      string        `json:"hashAlg"` // Include the hash algorithm in the request
+}
+
+func verifyPodFilesIntegrity(checkRequest PodWhitelistCheckRequest) error {
+	whitelistProviderWorkerValidateURL := "http://localhost:9090/whitelist/pod/check"
+
+	// Marshal the attestation request to JSON
+	jsonPayload, err := json.Marshal(checkRequest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Whitelist check request: %v", err)
+	}
+
+	// Make the POST request to the agent
+	resp, err := http.Post(whitelistProviderWorkerValidateURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to send Whitelist check request: %v", err)
+	}
+
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Whitelists Provider failed to process check request: %s (status: %d)", string(body), resp.StatusCode)
+	}
+
+	return nil
 }
 
 func checkPodUIDMatch(path, podUID string) bool {
+	var regexPattern string
 	// Replace dashes in podUID with underscores
 	adjustedPodUID := strings.ReplaceAll(podUID, "-", "_")
 
 	// Regex pattern to match the pod UID in the path
-	regexPattern := fmt.Sprintf(`kubepods[^\/]*-pod%s\.slice`, regexp.QuoteMeta(adjustedPodUID))
+	regexPattern = fmt.Sprintf(`kubepods[^\/]*-pod%s\.slice`, regexp.QuoteMeta(adjustedPodUID))
 
 	// Compile the regex
 	r, err := regexp.Compile(regexPattern)
@@ -263,7 +319,6 @@ func checkPodUIDMatch(path, podUID string) bool {
 
 func main() {
 	IMAAnalysys("eee87997-2192-4e41-927c-65e71a312518")
-
 }
 
 // Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs
@@ -350,8 +405,7 @@ func validateQuote(rwc io.ReadWriter, akHandle tpmutil.Handle) {
 		log.Fatalf("attestation data does not contain quote info")
 	}
 	if subtle.ConstantTimeCompare(attestationData.ExtraData, nonce) == 0 {
-		log.Fatalf("quote extraData %v did not match expected extraData %v",
-			attestationData.ExtraData, nonce)
+		log.Fatalf("quote extraData %v did not match expected extraData %v", attestationData.ExtraData, nonce)
 	}
 
 	inputPCRs, err := convertPCRs(input.PCRs.PCRs)
