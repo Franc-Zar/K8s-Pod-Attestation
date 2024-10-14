@@ -173,6 +173,69 @@ func extractSHADigest(input string) (string, error) {
 	return "", fmt.Errorf("input does not have a valid sha<algo>: prefix")
 }
 
+func verifyIMAhash(pcr10 string) {
+	// Open the file
+	IMAMeasurementLog, err := os.Open("./ascii_runtime_measurements")
+	if err != nil {
+		log.Fatalf("failed to open IMA measurement log: %v", err)
+	}
+	defer IMAMeasurementLog.Close()
+
+	// Read the file content
+	fileContent, err := io.ReadAll(IMAMeasurementLog)
+	if err != nil {
+		log.Fatalf("failed to read file: %v", err)
+	}
+
+	// Convert the decoded log to a string and split it into lines
+	logLines := strings.Split(string(fileContent), "\n")
+
+	previousHash := make([]byte, 20)
+	// Iterate through each line and extract relevant fields
+	for idx, IMALine := range logLines {
+		// Split the line by whitespace
+		IMAFields := strings.Fields(IMALine)
+
+		templateHashField := IMAFields[1]
+
+		// Use the helper function to extend the PCR with the current template hash
+		newHash, err := extendIMAEntries(previousHash, templateHashField)
+		if err != nil {
+			fmt.Printf("Error computing hash at index %d: %v\n", idx, err)
+			continue
+		}
+
+		// Update the previous hash for the next iteration
+		previousHash = newHash
+	}
+
+	// Convert the final hash to a hex string for comparison
+	cumulativeHashIMAHex := hex.EncodeToString(previousHash)
+	if cumulativeHashIMAHex != pcr10 {
+		log.Fatalf("IMA Verification failed: computed hash %s", cumulativeHashIMAHex)
+	}
+	log.Printf("IMA Verification successful: %s = %s", cumulativeHashIMAHex, pcr10)
+}
+
+// Helper function to compute the new hash by concatenating previous hash and template hash
+func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) {
+	// Create a new SHA-1 hash
+	hash := sha1.New()
+
+	// Decode the template hash from hexadecimal
+	templateHashBytes, err := hex.DecodeString(templateHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode template hash: %v", err)
+	}
+
+	// Concatenate previous hash and the new template hash
+	dataToHash := append(previousHash, templateHashBytes...)
+
+	// Compute the new hash
+	hash.Write(dataToHash)
+	return hash.Sum(nil), nil
+}
+
 func IMAAnalysys(podUID string) {
 	// Open the file
 	IMAMeasurementLog, err := os.Open("./ascii_runtime_measurements_sha256")
@@ -192,11 +255,6 @@ func IMAAnalysys(podUID string) {
 
 	// Use a map to ensure unique entries
 	uniqueEntries := make(map[string]IMAPodEntry)
-
-	// Initialize the hash computation
-	hash := sha256.New()
-	initialHash := [32]byte{} // Initial zero hash
-	hash.Write(initialHash[:])
 
 	// Iterate through each line and extract relevant fields
 	for _, IMALine := range logLines {
@@ -318,7 +376,8 @@ func checkPodUIDMatch(path, podUID string) bool {
 }
 
 func main() {
-	IMAAnalysys("eee87997-2192-4e41-927c-65e71a312518")
+	//IMAAnalysys("eee87997-2192-4e41-927c-65e71a312518")
+	verifyIMAhash("61f0b0d5021a930151775140e900ea55f98110d0")
 }
 
 // Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs

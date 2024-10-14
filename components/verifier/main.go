@@ -30,7 +30,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -447,7 +446,7 @@ func podAttestation(obj interface{}) {
 		return
 	}
 
-	IMAPodEntries, err := IMAAnalysis(attestationResponse.Evidence.WorkerIMA, PCRDigest, podUID)
+	IMAPodEntries, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCRDigest, podUID)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate IMA measurement log: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
@@ -509,8 +508,27 @@ func extractSHADigest(input string) (string, error) {
 	return "", fmt.Errorf("input does not have a valid sha<algo>: prefix")
 }
 
-// IMAAnalysis checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software
-func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, error) {
+// Helper function to compute the new hash by concatenating previous hash and template hash
+func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) {
+	// Create a new SHA context
+	hash := sha256.New()
+
+	// Decode the template hash from hexadecimal
+	templateHashBytes, err := hex.DecodeString(templateHash)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode template hash field: %v", err)
+	}
+
+	// Concatenate previous hash and the new template hash
+	dataToHash := append(previousHash, templateHashBytes...)
+
+	// Compute the new hash
+	hash.Write(dataToHash)
+	return hash.Sum(nil), nil
+}
+
+// IMAVerification checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software
+func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, error) {
 	// Step 1: Decode the base64-encoded IMA log
 	decodedLog, err := base64.StdEncoding.DecodeString(IMAMeasurementLog)
 	if err != nil {
@@ -521,24 +539,31 @@ func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, er
 	logLines := strings.Split(string(decodedLog), "\n")
 	uniqueEntries := make(map[string]IMAPodEntry)
 
-	// Step 3: Initialize the hash computation
-	hash := sha256.New()
-	initialHash := [32]byte{} // Initial zero hash
-	hash.Write(initialHash[:])
+	// initial PCR configuration
+	previousHash := make([]byte, 20)
 
 	// Iterate through each line and extract relevant fields
-	for _, IMALine := range logLines {
+	for idx, IMALine := range logLines {
 		// Split the line by whitespace
 		IMAFields := strings.Fields(IMALine)
 		if len(IMAFields) < 7 {
-			log.Fatalf("IMA measurement log integrity check failed: found entry not compliant with template: %s", IMALine)
+			return nil, fmt.Errorf("IMA measurement log integrity check failed: entry %d not compliant with template: %s", idx, IMALine)
 		}
 
 		templateHashField := IMAFields[1]
 		depField := IMAFields[3]
 		cgroupPathField := IMAFields[4]
 
-		// check if entry belongs to container or host
+		// Use the helper function to extend the IMA entries with the current template hash field
+		newHash, err := extendIMAEntries(previousHash, templateHashField)
+		if err != nil {
+			return nil, fmt.Errorf("Error computing hash at index %d: %v\n", idx, err)
+		}
+
+		// Update the previous hash for the next iteration
+		previousHash = newHash
+
+		// check if entry belongs to container or host, otherwise after having computed the extend hash, go to next entry in IMA ML
 		if !strings.Contains(depField, "containerd") {
 			continue
 		}
@@ -548,7 +573,7 @@ func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, er
 			// Extract the file hash and file path (sixth and seventh elements)
 			fileHash, err := extractSHADigest(IMAFields[5])
 			if err != nil {
-				log.Fatalf("failed to decode file hash field: %v", err)
+				return nil, fmt.Errorf("failed to decode file hash field: %v", err)
 			}
 			filePath := IMAFields[6]
 
@@ -563,22 +588,10 @@ func IMAAnalysis(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, er
 				}
 			}
 		}
-
-		// Concatenate previous hash and the new element
-		previousHash := hash.Sum(nil)
-		dataToHash := append(previousHash, templateHashField...)
-
-		// Compute the new hash
-		hash.Reset() // Reset the hash to start fresh
-		hash.Write(dataToHash)
 	}
 
-	// Get the final computed hash
-	cumulativeHashIMA := hash.Sum(nil)
-
 	// Convert the final hash to a hex string for comparison
-	cumulativeHashIMAHex := hex.EncodeToString(cumulativeHashIMA)
-
+	cumulativeHashIMAHex := hex.EncodeToString(previousHash)
 	// Compare the computed hash with the provided PCRDigest
 	// TODO delete node from cluster?
 	if cumulativeHashIMAHex != PCRDigest {
