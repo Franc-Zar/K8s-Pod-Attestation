@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registrar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registrar
+  template:
+    metadata:
+      labels:
+        app: registrar
+    spec:
+      containers:
+        - name: registrar
+          image: franczar/k8s-attestation-registrar:latest
+          env:
+            - name: REGISTRAR_PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+      volumes:
+        - name: kube-config
+          hostPath:
+            path: /home/node/.kube
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registrar-service
+spec:
+  selector:
+    app: registrar
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+      nodePort: 30000
+  type: NodePort

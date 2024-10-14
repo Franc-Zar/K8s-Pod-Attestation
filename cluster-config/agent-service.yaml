@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      containers:
+        - name: agent
+          image: franczar/k8s-attestation-agent:latest
+          env:
+            - name: AGENT_HOST
+              value: "10.0.2.13"
+            - name: AGENT_PORT
+              value: "8083"
+            - name: TPM_PATH
+              value: "/dev/tpm0"
+          ports:
+            - containerPort: 8083
+          volumeMounts:
+            - name: tpm-device
+              mountPath: /dev/tpm0
+            - name: ima-measurements
+              mountPath: /root/ascii_runtime_measurements
+              readOnly: true
+          securityContext:
+            privileged: true  # Required to access TPM and IMA
+      volumes:
+        - name: kube-config
+          hostPath:
+            path: /home/node/.kube
+        - name: tpm-device
+          hostPath:
+            path: /dev/tpm0
+            type: CharDevice
+        - name: ima-measurements
+          hostPath:
+            path: /sys/kernel/security/integrity/ima/ascii_runtime_measurements
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-service
+spec:
+  selector:
+    app: agent
+  ports:
+    - protocol: TCP
+      port: 8083
+      targetPort: 8083
+      nodePort: 30000
+  type: NodePort
