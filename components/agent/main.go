@@ -440,7 +440,7 @@ func podAttestation(c *gin.Context) {
 	}
 
 	// TODO collect claims and generate Evidence
-	evidence := Evidence {
+	evidence := Evidence{
 		PodName:     attestationRequest.PodName,
 		PodUID:      attestationRequest.PodUID,
 		TenantId:    attestationRequest.TenantId,
@@ -674,6 +674,6 @@ func main() {
 	fmt.Printf(green.Sprintf("Agent is running on port: %s\n", agentPORT))
 	err := r.Run(":" + agentPORT)
 	if err != nil {
-		log.Fatal("Error while starting Registrar server")
+		log.Fatal("Error while starting Agent server")
 	}
 }

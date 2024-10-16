@@ -184,7 +184,12 @@ func processAttestationRequestCRDEvent(event watch.Event) {
 	switch event.Type {
 	case watch.Added:
 		fmt.Printf(green.Sprintf("[%s] Attestation Request CRD Added:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatCRD(event.Object)))
-		podAttestation(event.Object)
+		attestationFailReason := podAttestation(event.Object)
+		if attestationFailReason != nil {
+			updateAgentCRDWithAttestationResult(event.Object, "UNTRUSTED", attestationFailReason.Error())
+		} else {
+			updateAgentCRDWithAttestationResult(event.Object, "TRUSTED", "Pod attestation endend with success")
+		}
 		deleteAttestationRequestCRDInstance(event.Object)
 
 	case watch.Modified:
@@ -338,62 +343,62 @@ func extractNodeName(agentName string) (string, error) {
 	return "", fmt.Errorf("invalid agentName format: %s", agentName)
 }
 
-func podAttestation(obj interface{}) {
+func podAttestation(obj interface{}) error {
 	spec := formatCRD(obj)
 
 	podName, exists := spec["podName"].(string)
 	if !exists {
-		fmt.Println(red.Println("[%s] Error: Missing 'podName' field in Attestation Request CRD"))
-		return
+		fmt.Printf(red.Sprintf("[%s] Error: Missing 'podName' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
+		return fmt.Errorf("Missing 'podName' field in Attestation Request CRD")
 	}
 
 	podUID, exists := spec["podUID"].(string)
 	if !exists {
 		fmt.Printf(red.Sprintf("[%s] Error: Missing 'podUID' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("podUID 'podName' field in Attestation Request CRD")
 	}
 
 	tenantId, exists := spec["tenantID"].(string)
 	if !exists {
 		fmt.Printf(red.Sprintf("[%s] Error: Missing 'tenantID' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("Missing 'tenantID' field in Attestation Request CRD")
 	}
 
 	agentName, exists := spec["agentName"].(string)
 	if !exists {
 		fmt.Printf(red.Sprintf("[%s] Error: Missing 'agentName' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("Missing 'agentName' field in Attestation Request CRD")
 	}
 
 	agentIP, exists := spec["agentIP"].(string)
 	if !exists {
 		fmt.Printf(red.Sprintf("[%s] Error: Missing 'agentIP' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("Missing 'agentIP' field in Attestation Request CRD")
 	}
 
 	hmacValue, exists := spec["hmac"].(string)
 	if !exists {
 		fmt.Printf(red.Sprintf("[%s] Error: Missing 'hmac' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("Missing 'hmac' field in Attestation Request CRD")
 	}
 
 	decodedHMAC, err := base64.StdEncoding.DecodeString(hmacValue)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to decode HMAC: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return fmt.Errorf("failed to decode HMAC: %v", err)
 	}
 
 	integrityMessage := fmt.Sprintf("%s::%s::%s::%s::%s", podName, podUID, tenantId, agentName, agentIP)
 	err = verifyHMAC([]byte(integrityMessage), attestationSecret, decodedHMAC)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while computing HMAC, Attestation Request for pod: %s is invalid\n", time.Now().Format("02-01-2006 15:04:05"), podName))
-		return
+		return fmt.Errorf("Invalid Attestation request: %v", err)
 	}
 
 	nonce, err := GenerateNonce(16)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while generating nonce\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("Failed to generate nonce to be sent to the Agent")
 	}
 
 	attestationRequest := AttestationRequest{
@@ -405,12 +410,14 @@ func podAttestation(obj interface{}) {
 
 	attestationRequestJSON, err := json.Marshal(attestationRequest)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error serializing Attestation Request\n", time.Now().Format("02-01-2006 15:04:05")))
+		fmt.Printf(red.Sprintf("[%s] Error while serializing Attestation Request\n", time.Now().Format("02-01-2006 15:04:05")))
+		return fmt.Errorf("Error while serializing Attestation Request")
 	}
 
 	attestationRequestSignature, err := signMessage(verifierKey, attestationRequestJSON)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error signing Attestation Request\n", time.Now().Format("02-01-2006 15:04:05")))
+		return fmt.Errorf("Error while signing Attestation Request")
 	}
 
 	attestationRequest.Signature = attestationRequestSignature
@@ -418,44 +425,45 @@ func podAttestation(obj interface{}) {
 	attestationResponse, err := sendAttestationRequestToAgent(agentIP, agentPORT, attestationRequest)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while sending Attestation Request to Agent: %s for pod: %s: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentName, podName, err.Error()))
-		return
+		return fmt.Errorf("Error while sending Attestation Request to Agent")
+
 	}
 
 	workerName, err := extractNodeName(agentName)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error verifying Attestation Evidence: invalid Worker name\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		fmt.Printf(red.Sprintf("[%s] Error while verifying Attestation Evidence: invalid Worker name\n", time.Now().Format("02-01-2006 15:04:05")))
+		return fmt.Errorf("Error while verifying Attestation Evidence: invalid Worker name")
 	}
 
 	evidenceJSON, err := json.Marshal(attestationResponse.Evidence)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error serializing Evidence\n", time.Now().Format("02-01-2006 15:04:05")))
-		return
+		return fmt.Errorf("Error while serializing received Evidence")
 	}
 
 	// process Evidence
 	_, err = verifyWorkerSignature(workerName, string(evidenceJSON), attestationResponse.Signature)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Evidence Signature Verification failed: %s\n", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
-		return
+		return fmt.Errorf("Evidence Signature verification failed")
 	}
 
 	PCRDigest, hashAlg, err := validateWorkerQuote(workerName, attestationResponse.Evidence.WorkerQuote, nonce)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate Worker Quote: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return fmt.Errorf("Error while validating Worker Quote")
 	}
 
 	IMAPodEntries, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCRDigest, podUID)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate IMA measurement log: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
+		return fmt.Errorf("Failed to validate IMA Measurement log")
 	}
 
 	podImageName, err := getPodImageNameByUID(podUID)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to get image of Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
-		return
+		fmt.Printf(red.Sprintf("[%s] Failed to get image name of Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
+		return fmt.Errorf("Failed to get image name of attested Pod")
 	}
 
 	podCheckRequest := PodWhitelistCheckRequest{
@@ -467,11 +475,11 @@ func podAttestation(obj interface{}) {
 	err = verifyPodFilesIntegrity(podCheckRequest)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to verify integrity of files executed by Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
-		return
+		return fmt.Errorf("Failed to verify integrity of files executed by Pod")
 	}
 
 	fmt.Printf(green.Sprintf("[%s] Attestation of Pod: %s succeeded\n", time.Now().Format("02-01-2006 15:04:05"), podName))
-	return
+	return nil
 }
 
 // getPodImageByUID retrieves the image of a pod given its UID
@@ -993,6 +1001,71 @@ spec:
 	}
 
 	fmt.Printf(green.Sprintf("[%s] CRD 'attestationRequest.example.com' created successfully\n", time.Now().Format("02-01-2006 15:04:05")))
+}
+
+func updateAgentCRDWithAttestationResult(obj interface{}, newStatus, reason string) {
+	attestationRequestSpec := formatCRD(obj)
+
+	podName, exists := attestationRequestSpec["podName"].(string)
+	if !exists {
+		fmt.Printf(red.Sprintf("[%s] Error: Missing 'podName' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
+		return
+	}
+
+	agentName, exists := attestationRequestSpec["agentName"].(string)
+	if !exists {
+		fmt.Printf(red.Sprintf("[%s] Error: Missing 'agentName' field in Attestation Request CRD\n", time.Now().Format("02-01-2006 15:04:05")))
+		return
+	}
+
+	// Get the dynamic client resource interface for the CRD
+	crdResource := dynamicClient.Resource(schema.GroupVersionResource{
+		Group:    "example.com", // The group from your CRD
+		Version:  "v1",          // The version of your CRD
+		Resource: "agents",      // The plural resource name from your CRD
+	}).Namespace("kube-system") // Modify namespace if needed
+
+	// Fetch the CRD instance for the given node
+	crdInstance, err := crdResource.Get(context.Background(), agentName, metav1.GetOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error getting Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return
+	}
+
+	// Get the 'spec' field of the CRD
+	spec := crdInstance.Object["spec"].(map[string]interface{})
+
+	// Fetch the 'podStatus' array
+	podStatusList := spec["podStatus"].([]interface{})
+
+	// Iterate through the 'podStatus' array to find and update the relevant pod
+	for i, ps := range podStatusList {
+		pod := ps.(map[string]interface{})
+		if pod["podName"].(string) == podName {
+			// Update pod attributes
+			pod["status"] = newStatus
+			pod["reason"] = reason
+			pod["lastCheck"] = time.Now().Format(time.RFC3339)
+
+			// Replace the updated pod back in the podStatus array
+			podStatusList[i] = pod
+			break
+		}
+	}
+
+	// Update the CRD spec with the modified 'podStatus' array
+	spec["podStatus"] = podStatusList
+	crdInstance.Object["spec"] = spec
+
+	// Push the updates back to the Kubernetes API
+	_, err = crdResource.Update(context.Background(), crdInstance, metav1.UpdateOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error updating Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return
+	}
+
+	// Log the success
+	fmt.Printf(green.Sprintf("[%s] Agent CRD '%s' updated. Pod: %s, Status: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentName, podName, newStatus))
 }
 
 func main() {
