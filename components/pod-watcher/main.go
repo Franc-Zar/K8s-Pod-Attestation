@@ -112,17 +112,17 @@ func watchPods() {
 			switch event.Type {
 			case watch.Added:
 				fmt.Printf(green.Sprintf("[%s] Pod %s added to node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
-				updateAgentCRDWithPodStatus(nodeName, pod.Name, "Trusted")
+				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "Trusted")
 
 			case watch.Deleted:
 				fmt.Printf(yellow.Sprintf("[%s] Pod %s deleted from node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
-				updateAgentCRDWithPodStatus(nodeName, pod.Name, "Deleted")
+				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "Deleted")
 			}
 		}
 	}
 }
 
-func updateAgentCRDWithPodStatus(nodeName, podName, status string) {
+func updateAgentCRDWithPodStatus(nodeName, podName, tenantId, status string) {
 	// Get the current CRD instance
 	crdResource := dynamicClient.Resource(schema.GroupVersionResource{
 		Group:    "example.com",
@@ -155,7 +155,7 @@ func updateAgentCRDWithPodStatus(nodeName, podName, status string) {
 	if status != "Deleted" {
 		newPodStatus = append(newPodStatus, map[string]interface{}{
 			"podName":   podName,
-			"tenantID":  getTenantIDFromPodName(podName),
+			"tenantID":  tenantId,
 			"status":    status,
 			"reason":    "reason of new status",
 			"lastCheck": time.Now().Format("2006-01-02T15:04:05Z07:00"),
@@ -163,7 +163,6 @@ func updateAgentCRDWithPodStatus(nodeName, podName, status string) {
 	}
 
 	spec["podStatus"] = newPodStatus
-
 	crdInstance.Object["spec"] = spec
 
 	// Update the CRD instance
@@ -174,13 +173,6 @@ func updateAgentCRDWithPodStatus(nodeName, podName, status string) {
 	}
 
 	fmt.Printf(green.Sprintf("[%s] Agent CRD 'agent-%s' updated. Involved Pod: %s\n", time.Now().Format("02-01-2006 15:04:05"), nodeName, podName))
-}
-
-func getTenantIDFromPodName(podName string) string {
-	parts := strings.Split(podName, "-tenant-")
-	// The tenantID is the last part of the split array
-	tenantID := parts[len(parts)-1]
-	return tenantID
 }
 
 func main() {

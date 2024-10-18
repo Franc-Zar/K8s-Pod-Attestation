@@ -220,7 +220,12 @@ func deployPod(yamlContent, tenantName string) error {
 		pod.Namespace = "default"
 	}
 
-	pod.ObjectMeta.Name = fmt.Sprintf("%s-tenant-%s", pod.GetObjectMeta().GetName(), tenantResp.TenantID)
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+
+	pod.Annotations["tenantID"] = tenantResp.TenantID
+
 	podsClient := clientset.CoreV1().Pods(pod.Namespace)
 	result, err := podsClient.Create(context.TODO(), &pod, metav1.CreateOptions{})
 	if err != nil {
@@ -311,10 +316,8 @@ func requestPodAttestation(c *gin.Context) {
 		return
 	}
 
-	fullPodName := fmt.Sprintf("%s-tenant-%s", req.PodName, tenant.TenantID)
-
 	// get Pod information (Worker on which it is deployed, this is needed to also retrieve the Agent to contact, the Agent CRD to control ensuring Tenant ownership of pod to be attested)
-	workerDeploying, agentIP, podUID, err := getAttestationInformation(fullPodName)
+	workerDeploying, agentIP, podUID, err := getAttestationInformation(req.PodName)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": err.Error()})
 		return
@@ -323,13 +326,13 @@ func requestPodAttestation(c *gin.Context) {
 	agentCRDName := fmt.Sprintf("agent-%s", workerDeploying)
 
 	// check if Pod is signed into the target Agent CRD and if it is actually owned by the calling Tenant
-	err = checkAgentCRD(agentCRDName, fullPodName, tenant.TenantID)
+	err = checkAgentCRD(agentCRDName, req.PodName, tenant.TenantID)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": err.Error()})
 		return
 	}
 
-	integrityMessage := fmt.Sprintf("%s::%s::%s::%s::%s", fullPodName, podUID, tenant.TenantID, agentCRDName, agentIP)
+	integrityMessage := fmt.Sprintf("%s::%s::%s::%s::%s", req.PodName, podUID, tenant.TenantID, agentCRDName, agentIP)
 	hmacValue, err := computeHMAC([]byte(integrityMessage), attestationSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -340,7 +343,7 @@ func requestPodAttestation(c *gin.Context) {
 	}
 
 	// issue an Attestation Request for target Pod and Agent, it will be intercepted by the Verifier
-	err = issueAttestationRequestCRD(fullPodName, podUID, tenant.TenantID, agentCRDName, agentIP, base64.StdEncoding.EncodeToString(hmacValue))
+	err = issueAttestationRequestCRD(req.PodName, podUID, tenant.TenantID, agentCRDName, agentIP, base64.StdEncoding.EncodeToString(hmacValue))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": err.Error()})
 		return

@@ -91,6 +91,13 @@ type PodWhitelistCheckRequest struct {
 	HashAlg      string        `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
+type AttestationResult struct {
+	Target     string
+	TargetType string
+	Result     string
+	Reason     string
+}
+
 // Color variables for output
 var (
 	red                  *color.Color
@@ -168,17 +175,6 @@ func watchAttestationRequestCRDChanges(stopCh chan os.Signal) {
 	}
 }
 
-func getNodeContainerEngine(nodeName string) (string, error) {
-	// Get a list of nodes in the cluster
-	// Retrieve the Node information using the nodeName
-	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to get node: %v", err)
-	}
-	containerEngine := node.Status.NodeInfo.ContainerRuntimeVersion
-	return containerEngine, nil
-}
-
 // processAttestationRequestCRDEvent handles different types of CRD events (Added, Modified, Deleted).
 func processAttestationRequestCRDEvent(event watch.Event) {
 	switch event.Type {
@@ -188,7 +184,7 @@ func processAttestationRequestCRDEvent(event watch.Event) {
 		if attestationFailReason != nil {
 			updateAgentCRDWithAttestationResult(event.Object, "UNTRUSTED", attestationFailReason.Error())
 		} else {
-			updateAgentCRDWithAttestationResult(event.Object, "TRUSTED", "Pod attestation endend with success")
+			updateAgentCRDWithAttestationResult(event.Object, "TRUSTED", "Pod attestation ended with success")
 		}
 		deleteAttestationRequestCRDInstance(event.Object)
 
@@ -535,7 +531,7 @@ func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) 
 	return hash.Sum(nil), nil
 }
 
-// IMAVerification checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software
+// IMAVerification checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software and the AttestationResult
 func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, error) {
 	// Step 1: Decode the base64-encoded IMA log
 	decodedLog, err := base64.StdEncoding.DecodeString(IMAMeasurementLog)
@@ -601,7 +597,6 @@ func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry
 	// Convert the final hash to a hex string for comparison
 	cumulativeHashIMAHex := hex.EncodeToString(previousHash)
 	// Compare the computed hash with the provided PCRDigest
-	// TODO delete node from cluster?
 	if cumulativeHashIMAHex != PCRDigest {
 		return nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match PCRDigest")
 	}

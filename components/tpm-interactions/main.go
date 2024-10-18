@@ -377,7 +377,7 @@ func checkPodUIDMatch(path, podUID string) bool {
 
 func main() {
 	//IMAAnalysys("eee87997-2192-4e41-927c-65e71a312518")
-	verifyIMAhash("61f0b0d5021a930151775140e900ea55f98110d0")
+	//verifyIMAhash("61f0b0d5021a930151775140e900ea55f98110d0")
 }
 
 // Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs

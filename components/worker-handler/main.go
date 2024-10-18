@@ -137,9 +137,6 @@ func loadEnvironmentVariables() {
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		if key == "ATTESTATION_NAMESPACE" {
-			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
-		}
 		return defaultValue
 	}
 	return value
@@ -876,12 +873,8 @@ spec:
               properties:
                 agentName:
                   type: string
-                agentStatus:
-                  type: string
                 nodeStatus:
                   type: string
-                enabled:
-                  type: boolean
                 podStatus:
                   type: array
                   items:
