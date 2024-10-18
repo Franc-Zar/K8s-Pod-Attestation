@@ -793,7 +793,7 @@ func createAgentCRDInstance(nodeName string) {
 	var podStatus []map[string]interface{}
 	for _, pod := range pods.Items {
 		podName := pod.Name
-		tenantID := getTenantIDFromPodName(podName)
+		tenantID := pod.Annotations["tenantID"]
 
 		// Skip pods with name prefixed with "agent-"
 		if strings.HasPrefix(podName, "agent-") {
