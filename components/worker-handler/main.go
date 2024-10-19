@@ -99,6 +99,11 @@ type WorkerWhitelistCheckRequest struct {
 	HashAlg       string `json:"hashAlg"`
 }
 
+type VerifyTPMEKCertificateRequest struct {
+	EndorsementKey string `json:"endorsementKey"`
+	EKCertificate  string `json:"EKCertificate"`
+}
+
 // Color variables for output
 var (
 	red                  *color.Color
@@ -302,7 +307,6 @@ func decodePublicKeyFromPEM(publicKeyPEM string) (*rsa.PublicKey, error) {
 	default:
 		return nil, fmt.Errorf("unsupported public key type: %s", block.Type)
 	}
-
 	return rsaPubKey, nil
 }
 
@@ -326,7 +330,7 @@ func workerRemoval(node *corev1.Node) {
 	// Create a new HTTP request
 	req, err := http.NewRequest(http.MethodDelete, registrarWorkerDeletionURL, nil)
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error creating Worker removal request: %v\n", err))
+		fmt.Printf(red.Sprintf("Error creating Worker Node removal request: %v\n", err))
 		return
 	}
 
@@ -334,18 +338,18 @@ func workerRemoval(node *corev1.Node) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error sending Worker removal request: %v\n", err))
+		fmt.Printf(red.Sprintf("Error sending Worker Node removal request: %v\n", err))
 		return
 	}
 	defer resp.Body.Close()
 
 	// Check the response status
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf(red.Sprintf("Failed to delete Worker: received status code %d\n", resp.StatusCode))
+		fmt.Printf(red.Sprintf("Failed to remove Worker Node from Registrar: received status code %d\n", resp.StatusCode))
 		return
 	}
 
-	fmt.Printf(yellow.Sprintf("[%s] Worker Node: %s removed with success\n", time.Now().Format("02-01-2006 15:04:05"), node.GetName()))
+	fmt.Printf(yellow.Sprintf("[%s] Worker Node: %s removed from Registrar with success\n", time.Now().Format("02-01-2006 15:04:05"), node.GetName()))
 	deleteAgentCRDInstance(node.Name)
 }
 
@@ -403,6 +407,19 @@ func workerRegistration(node *corev1.Node) bool {
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to call Agent API: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
+	}
+
+	// TEST: this allows the agent in 'simulator' mode to be compliant with the framework
+	if workerData.EKCert != "EK Certificate not provided" {
+		EKCertCheckRequest := VerifyTPMEKCertificateRequest{
+			EndorsementKey: workerData.EK,
+			EKCertificate:  workerData.EKCert,
+		}
+		err = verifyEKCertificate(EKCertCheckRequest)
+		if err != nil {
+			fmt.Printf(red.Sprintf("[%s] Failed to verify EK Certificate: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+			return false
+		}
 	}
 
 	// Decode EK and AIK
@@ -508,6 +525,37 @@ func workerRegistration(node *corev1.Node) bool {
 	return true
 }
 
+func verifyEKCertificate(EKCertcheckRequest VerifyTPMEKCertificateRequest) error {
+	registrarCertificateValidateURL := fmt.Sprintf("http://%s:%s/worker/verifyEKCertificate", registrarHOST, registrarPORT)
+
+	// Marshal the attestation request to JSON
+	jsonPayload, err := json.Marshal(EKCertcheckRequest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal EK Certificate check request: %v", err)
+	}
+
+	// Make the POST request to the agent
+	resp, err := http.Post(registrarCertificateValidateURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to send EK Certificate check request: %v", err)
+	}
+
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Registrar failed to validate EK Certificate: %s (status: %d)", string(body), resp.StatusCode)
+	}
+	return nil
+
+}
+
 func verifyBootAggregate(checkRequest WorkerWhitelistCheckRequest) error {
 	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/worker/os/check", whitelistHOST, whitelistPORT)
 
@@ -533,9 +581,8 @@ func verifyBootAggregate(checkRequest WorkerWhitelistCheckRequest) error {
 
 	// Check if the status is OK (200)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Whitelists Provider failed to process check request: %s (status: %d)", string(body), resp.StatusCode)
+		return fmt.Errorf("Whitelist Provider failed to process check request: %s (status: %d)", string(body), resp.StatusCode)
 	}
-
 	return nil
 }
 
@@ -574,7 +621,7 @@ func validateWorkerQuote(quoteJSON, nonce string, AIK *rsa.PublicKey) (string, s
 	// decode nonce from hex
 	nonceBytes, err := hex.DecodeString(nonce)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to decode ")
+		return "", "", fmt.Errorf("Failed to decode nonce: %v", err)
 	}
 
 	// Parse inputQuote JSON
@@ -820,11 +867,9 @@ func createAgentCRDInstance(nodeName string) {
 				"namespace": "kube-system",
 			},
 			"spec": map[string]interface{}{
-				"agentName":   fmt.Sprintf("agent-%s", nodeName),
-				"agentStatus": "Ready",
-				"nodeStatus":  "Trusted",
-				"enabled":     true,
-				"podStatus":   podStatus,
+				"agentName":  fmt.Sprintf("agent-%s", nodeName),
+				"nodeStatus": "Trusted",
+				"podStatus":  podStatus,
 			},
 		},
 	}

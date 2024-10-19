@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go application
-RUN go build -o whitelists-provider .
+RUN go build -o whitelist-provider .
 
 # Use a minimal Docker image for running the application
 FROM alpine:latest

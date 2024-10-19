@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	x509ext "github.com/google/go-attestation/x509"
 	"github.com/google/go-tpm-tools/client"
 	"net/http"
 	"os"
@@ -160,6 +161,87 @@ func main() {
 	log.Printf("uuid match")
 }
 */
+
+// LoadCertificateFromPEM loads a certificate from a PEM string
+func LoadCertificateFromPEM(pemCert string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(pemCert))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("failed to decode PEM block containing the certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %v", err)
+	}
+
+	return cert, nil
+}
+
+// VerifyCertificateChain verifies the provided certificate chain from PEM strings
+func VerifyCertificateChain(providedCertPEM, intermediateCertPEM, rootCertPEM string) error {
+	cert, err := LoadCertificateFromPEM(providedCertPEM)
+	if err != nil {
+		return fmt.Errorf("error loading provided certificate: %v", err)
+	}
+
+	intermediateCert, err := LoadCertificateFromPEM(intermediateCertPEM)
+	if err != nil {
+		return fmt.Errorf("error loading intermediate CA certificate: %v", err)
+	}
+
+	rootCert, err := LoadCertificateFromPEM(rootCertPEM)
+	if err != nil {
+		return fmt.Errorf("error loading root CA certificate: %v", err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+
+	intermediates := x509.NewCertPool()
+	intermediates.AddCert(intermediateCert)
+
+	opts := x509.VerifyOptions{
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		Roots:         roots,
+		Intermediates: intermediates,
+	}
+
+	_, err = HandleTPMSubjectAltName(cert)
+	if err != nil {
+		return err
+	}
+
+	if _, err := cert.Verify(opts); err != nil {
+		return fmt.Errorf("certificate verification failed: %v", err)
+	}
+	return nil
+}
+
+// HandleTPMSubjectAltName processes the subjectAltName extension to mark it as handled
+func HandleTPMSubjectAltName(cert *x509.Certificate) (*x509ext.SubjectAltName, error) {
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal([]int{2, 5, 29, 17}) { // OID for subjectAltName
+			subjectAltName, err := x509ext.ParseSubjectAltName(ext)
+			if err != nil {
+				return nil, err
+			}
+			//TPMManufacturer := subjectAltName.DirectoryNames[0].Names[0]
+			//TPMModel := subjectAltName.DirectoryNames[0].Names[1]
+			//TPMVersion := subjectAltName.DirectoryNames[0].Names[2]
+
+			// Remove from UnhandledCriticalExtensions if it's the SAN extension
+			for i, unhandledExt := range cert.UnhandledCriticalExtensions {
+				if unhandledExt.Equal(ext.Id) {
+					// Remove the SAN extension from UnhandledCriticalExtensions
+					cert.UnhandledCriticalExtensions = append(cert.UnhandledCriticalExtensions[:i], cert.UnhandledCriticalExtensions[i+1:]...)
+					break
+				}
+			}
+			return subjectAltName, nil
+		}
+	}
+	return nil, fmt.Errorf("SAN extension not found")
+}
 
 // extractSHADigest extracts the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
 func extractSHADigest(input string) (string, error) {
@@ -378,6 +460,14 @@ func checkPodUIDMatch(path, podUID string) bool {
 func main() {
 	//IMAAnalysys("eee87997-2192-4e41-927c-65e71a312518")
 	//verifyIMAhash("61f0b0d5021a930151775140e900ea55f98110d0")
+	tpmCert := "-----BEGIN CERTIFICATE-----\nMIIElTCCA32gAwIBAgIEFMzNOTANBgkqhkiG9w0BAQsFADCBgzELMAkGA1UEBhMC\nREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEaMBgGA1UECwwR\nT1BUSUdBKFRNKSBUUE0yLjAxNTAzBgNVBAMMLEluZmluZW9uIE9QVElHQShUTSkg\nUlNBIE1hbnVmYWN0dXJpbmcgQ0EgMDAzMB4XDTE2MDEwMTEzMTAyMloXDTMxMDEw\nMTEzMTAyMlowADCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAISFY3i9\nWciX46z/ALiAKejoHbxDOTyldeUPYwNVxU9rOEuWl9EvB+cn//ecWPeVXjj1rqYP\nwZztCDPORjHa93JnW+z75brKmtekC1O8R9ii8oAyEHmwvvgxHd8oOLqHBfTvodn2\n1pE6gxbeZCETU6FcpqVMHJJQBpNocX7nOX/2QqJW10MkUN+b8EodEv7xJ5dFV7B6\nkG9UowP1hqgSngG4gOrm3wAfXREsU0ne9KYTSZwXWb6JErIM0OqY/1Uv4fNmd5BQ\nUJwXQK4WKfQlT5++d2oJHpYkF99CHM4l/JlSg1+apZ80cGfNA9nhuk/E89lrc7MM\nITuVMCij4Mu9XqMCAwEAAaOCAZEwggGNMFsGCCsGAQUFBwEBBE8wTTBLBggrBgEF\nBQcwAoY/aHR0cDovL3BraS5pbmZpbmVvbi5jb20vT3B0aWdhUnNhTWZyQ0EwMDMv\nT3B0aWdhUnNhTWZyQ0EwMDMuY3J0MA4GA1UdDwEB/wQEAwIAIDBRBgNVHREBAf8E\nRzBFpEMwQTEWMBQGBWeBBQIBDAtpZDo0OTQ2NTgwMDETMBEGBWeBBQICDAhTTEIg\nOTY2NTESMBAGBWeBBQIDDAdpZDowNTI4MAwGA1UdEwEB/wQCMAAwUAYDVR0fBEkw\nRzBFoEOgQYY/aHR0cDovL3BraS5pbmZpbmVvbi5jb20vT3B0aWdhUnNhTWZyQ0Ew\nMDMvT3B0aWdhUnNhTWZyQ0EwMDMuY3JsMBUGA1UdIAQOMAwwCgYIKoIUAEQBFAEw\nHwYDVR0jBBgwFoAUQLhoK40YRQorBoSdm1zZb0zd9L4wEAYDVR0lBAkwBwYFZ4EF\nCAEwIQYDVR0JBBowGDAWBgVngQUCEDENMAsMAzIuMAIBAAIBdDANBgkqhkiG9w0B\nAQsFAAOCAQEApynlEZGc4caT7bQJjhrvOtv4RFu3FNA9hgsF+2BGltsumqo9n3nU\nGoGt65A5mJAMCY1gGF1knvUFq8ey+UuIFw3QulHGENOiRu0aT3x9W7c6BxQIDFFC\nPtA+Qvvg+HJJ6XjihQRc3DU01HZm3xD//fGIDuYasZwBd2g/Ejedp2tKBl2M98FO\n48mbZ4WtaPrEALn3UQMf27pWqe2hUKFSKDEurijnchsdmRjTmUEWM1/9GFkh6IrT\nYvRBngNqOffJ+If+PI3x2GXkGnzsA6IxroEY9CwOhmNp+6xbAgqUedd5fWMLBN3Q\nMjHSp1Sl8wp00xRztfh0diBdicy3Hbn03g==\n-----END CERTIFICATE-----"
+	intermediateCert := "-----BEGIN CERTIFICATE-----\nMIIFszCCA5ugAwIBAgIEasM5FDANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJE\nRTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJP\nUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkg\nUlNBIFJvb3QgQ0EwHhcNMTQxMTI0MTUzNzE2WhcNMzQxMTI0MTUzNzE2WjCBgzEL\nMAkGA1UEBhMCREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEa\nMBgGA1UECwwRT1BUSUdBKFRNKSBUUE0yLjAxNTAzBgNVBAMMLEluZmluZW9uIE9Q\nVElHQShUTSkgUlNBIE1hbnVmYWN0dXJpbmcgQ0EgMDAzMIIBIjANBgkqhkiG9w0B\nAQEFAAOCAQ8AMIIBCgKCAQEAuUD5SLLVYRmuxDjT3cWQbRTywTWUVFE3EupJQZjJ\n9mvFc2KcjpQv6rpdaT4JC33P1M9iJgrHwYO0AZlGl2FcFpSNkc/3CWoMTT9rOdwS\n/MxlNSkxwTz6IAYUYh7+pd7T49NpRRGZ1dOMfyOxWgA4C0g3EP/ciIvA2cCZ95Hf\nARD9NhuG2DAEYGNRSHY2d/Oxu+7ytzkGFFj0h1jnvGNJpWNCf3CG8aNc5gJAduMr\nWcaMHb+6fWEysg++F2FLav813+/61FqvSrUMsQg0lpE16KBA5QC2Wcr/kLZGVVGc\nuALtgJ/bnd8XgEv7W8WG+jyblUe+hkZWmxYluHS3yJeRbwIDAQABo4IBODCCATQw\nVwYIKwYBBQUHAQEESzBJMEcGCCsGAQUFBzAChjtodHRwOi8vcGtpLmluZmluZW9u\nLmNvbS9PcHRpZ2FSc2FSb290Q0EvT3B0aWdhUnNhUm9vdENBLmNydDAdBgNVHQ4E\nFgQUQLhoK40YRQorBoSdm1zZb0zd9L4wDgYDVR0PAQH/BAQDAgAGMBIGA1UdEwEB\n/wQIMAYBAf8CAQAwTAYDVR0fBEUwQzBBoD+gPYY7aHR0cDovL3BraS5pbmZpbmVv\nbi5jb20vT3B0aWdhUnNhUm9vdENBL09wdGlnYVJzYVJvb3RDQS5jcmwwFQYDVR0g\nBA4wDDAKBggqghQARAEUATAfBgNVHSMEGDAWgBTcu1ar8Rj8ppp1ERBlhBKe1UGS\nuTAQBgNVHSUECTAHBgVngQUIATANBgkqhkiG9w0BAQsFAAOCAgEAeUzrsGq3oQOT\nmF7g71TtMMndwPxgZvaB4bAc7dNettn5Yc1usikERfvJu4/iBs/Tdl6z6TokO+6V\nJuBb6PDV7f5MFfffeThraPCTeDcyYBzQRGnoCxc8Kf81ZJT04ef8CQkkfuZHW1pO\n+HHM1ZfFfNdNTay1h83x1lg1U0KnlmJ5KCVFiB94owr9t5cUoiSbAsPcpqCrWczo\nRsg1aTpokwI8Y45lqgt0SxEmQw2PIAEjHG2GQcLBDeI0c7cK5OMEjSMXStJHmNbp\nu4RHXzd+47nCD2kGV8Bx5QnK8qDVAFAe/UTDQi5mTtDFRL36Nns7jz8USemu+bw9\nl24PN73rKcB2wNF2/oFTLPHkdYfTKYGXG1g2ZkDcTAENSOq3fcTfAuyHQozBwYHG\nGGyyPHy6KvLkqMQuqeDv0QxGOtE+6cedFMP2D9bMaujR389mSm7DE6YyNQClRW7w\nJ1+rNYuN2vErvB96ir1zljXq0yMxrm5nTeiAT4p5eoFqoeSYDbFljt/f+PebREiO\nnJIy4fdvKlHAf70gPdYpYipc4oTZxLeWjDQxRFFBDFrnLdlPSg6zSL2Q3ANAEI3y\nMtHaEaU0wbaBvezyzMUHI5nLnYFL+QRP4N2OFNI/ejBaEpmIXzf6+/eF40MNLHuR\n9/B93Q+hpw8O6XZ7qx697I+5+smLlPQ=\n-----END CERTIFICATE-----\n"
+	rootCert := "-----BEGIN CERTIFICATE-----\nMIIFqzCCA5OgAwIBAgIBAzANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJERTEh\nMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ\nR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkgUlNB\nIFJvb3QgQ0EwHhcNMTMwNzI2MDAwMDAwWhcNNDMwNzI1MjM1OTU5WjB3MQswCQYD\nVQQGEwJERTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYD\nVQQLDBJPUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElH\nQShUTSkgUlNBIFJvb3QgQ0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoIC\nAQC7E+gc0B5T7awzux66zMMZMTtCkPqGv6a3NVx73ICg2DSwnipFwBiUl9soEodn\n25SVVN7pqmvKA2gMTR5QexuYS9PPerfRZrBY00xyFx84V+mIRPg4YqUMLtZBcAwr\nR3GO6cffHp20SBH5ITpuqKciwb0v5ueLdtZHYRPq1+jgy58IFY/vACyF/ccWZxUS\nJRNSe4ruwBgI7NMWicxiiWQmz1fE3e0mUGQ1tu4M6MpZPxTZxWzN0mMz9noj1oIT\nZUnq/drN54LHzX45l+2b14f5FkvtcXxJ7OCkI7lmWIt8s5fE4HhixEgsR2RX5hzl\n8XiHiS7uD3pQhBYSBN5IBbVWREex1IUat5eAOb9AXjnZ7ivxJKiY/BkOmrNgN8k2\n7vOS4P81ix1GnXsjyHJ6mOtWRC9UHfvJcvM3U9tuU+3dRfib03NGxSPnKteL4SP1\nbdHfiGjV3LIxzFHOfdjM2cvFJ6jXg5hwXCFSdsQm5e2BfT3dWDBSfR4h3Prpkl6d\ncAyb3nNtMK3HR5yl6QBuJybw8afHT3KRbwvOHOCR0ZVJTszclEPcM3NQdwFlhqLS\nghIflaKSPv9yHTKeg2AB5q9JSG2nwSTrjDKRab225+zJ0yylH5NwxIBLaVHDyAEu\n81af+wnm99oqgvJuDKSQGyLf6sCeuy81wQYO46yNa+xJwQIDAQABo0IwQDAdBgNV\nHQ4EFgQU3LtWq/EY/KaadREQZYQSntVBkrkwDgYDVR0PAQH/BAQDAgAGMA8GA1Ud\nEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBAGHTBUx3ETIXYJsaAgb2pyyN\nUltVL2bKzGMVSsnTCrXUU8hKrDQh3jNIMrS0d6dU/fGaGJvehxmmJfjaN/IFWA4M\nBdZEnpAe2fJEP8vbLa/QHVfsAVuotLD6QWAqeaC2txpxkerveoV2JAwj1jrprT4y\nrkS8SxZuKS05rYdlG30GjOKTq81amQtGf2NlNiM0lBB/SKTt0Uv5TK0jIWbz2WoZ\ngGut7mF0md1rHRauWRcoHQdxWSQTCTtgoQzeBj4IS6N3QxQBKV9LL9UWm+CMIT7Y\nnp8bSJ8oW4UdpSuYWe1ZwSjZyzDiSzpuc4gTS6aHfMmEfoVwC8HN03/HD6B1Lwo2\nDvEaqAxkya9IYWrDqkMrEErJO6cqx/vfIcfY/8JYmUJGTmvVlaODJTwYwov/2rjr\nla5gR+xrTM7dq8bZimSQTO8h6cdL6u+3c8mGriCQkNZIZEac/Gdn+KwydaOZIcnf\nRdp3SalxsSp6cWwJGE4wpYKB2ClM2QF3yNQoTGNwMlpsxnU72ihDi/RxyaRTz9OR\npubNq8Wuq7jQUs5U00ryrMCZog1cxLzyfZwwCYh6O2CmbvMoydHNy5CU3ygxaLWv\nJpgZVHN103npVMR3mLNa3QE+5MFlBlP3Mmystu8iVAKJas39VO5y5jad4dRLkwtM\n6sJa8iBpdRjZrBp5sJBI\n-----END CERTIFICATE-----\n"
+	err := VerifyCertificateChain(tpmCert, intermediateCert, rootCert)
+	if err != nil {
+		log.Fatalf("Certificate is not valid: %v", err)
+	}
+	log.Printf("Valid certificate tpm")
 }
 
 // Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs

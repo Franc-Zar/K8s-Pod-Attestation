@@ -5,6 +5,7 @@ go 1.22.2
 require (
 	github.com/fatih/color v1.17.0
 	github.com/gin-gonic/gin v1.10.0
+	github.com/google/go-attestation v0.5.1
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.33.1
 )
