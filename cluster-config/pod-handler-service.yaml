@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: pod-handler
+  namespace: attestation-system
 spec:
   replicas: 1
   selector:
@@ -17,7 +18,7 @@ spec:
           image: franczar/k8s-attestation-pod-handler:latest
           env:
             - name: REGISTRAR_HOST
-              value: "192.168.60.21"
+              value: "localhost"
             - name: REGISTRAR_PORT
               value: "30000"
             - name: POD_HANDLER_PORT

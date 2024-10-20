@@ -17,10 +17,8 @@ spec:
         - name: agent
           image: franczar/k8s-attestation-agent:latest
           env:
-            - name: AGENT_HOST
-              value: "10.0.2.13"
             - name: AGENT_PORT
-              value: "8083"
+              value: "8080"
             - name: TPM_PATH
               value: "/dev/tpm0"
           ports:

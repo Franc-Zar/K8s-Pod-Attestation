@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verifier
+  namespace: attestation-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: verifier
+  template:
+    metadata:
+      labels:
+        app: verifier
+    spec:
+      containers:
+        - name: verifier
+          image: franczar/k8s-attestation-pod-verifier:latest
+          volumeMounts:
+            - name: kube-config
+          mountPath: /root/.kube
+      volumes:
+        - name: kube-config
+          hostPath:
+            path: /home/node/.kube

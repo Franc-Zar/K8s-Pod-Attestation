@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-handler
+  namespace: attestation-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-handler
+  template:
+    metadata:
+      labels:
+        app: worker-handler
+    spec:
+      containers:
+        - name: worker-handler
+          image: franczar/k8s-attestation-worker-handler:latest
+          env:
+            - name: REGISTRAR_HOST
+              value: "localhost"
+            - name: REGISTRAR_PORT
+              value: "30000"
+            - name: WHITELIST_HOST
+              value: "localhost"
+            - name: WHITELIST_PORT
+              value: "30002"
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-handler-service
+spec:
+  selector:
+    app: worker-handler
+  ports:
+    - protocol: TCP
+      port: 8083
+      targetPort: 8080
+      nodePort: 30003
+  type: NodePort
