@@ -112,11 +112,11 @@ func watchPods() {
 			switch event.Type {
 			case watch.Added:
 				fmt.Printf(green.Sprintf("[%s] Pod %s added to node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
-				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "Trusted")
+				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "TRUSTED")
 
 			case watch.Deleted:
 				fmt.Printf(yellow.Sprintf("[%s] Pod %s deleted from node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
-				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "Deleted")
+				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "DELETED")
 			}
 		}
 	}
@@ -152,17 +152,18 @@ func updateAgentCRDWithPodStatus(nodeName, podName, tenantId, status string) {
 		}
 	}
 
-	if status != "Deleted" {
+	if status != "DELETED" {
 		newPodStatus = append(newPodStatus, map[string]interface{}{
 			"podName":   podName,
 			"tenantID":  tenantId,
 			"status":    status,
-			"reason":    "reason of new status",
-			"lastCheck": time.Now().Format("2006-01-02T15:04:05Z07:00"),
+			"reason":    "Newly created Pod is trusted by default",
+			"lastCheck": time.Now().Format(time.RFC3339),
 		})
 	}
 
 	spec["podStatus"] = newPodStatus
+	spec["lastUpdate"] = time.Now().Format(time.RFC3339)
 	crdInstance.Object["spec"] = spec
 
 	// Update the CRD instance

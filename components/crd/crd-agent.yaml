@@ -23,12 +23,8 @@ spec:
               properties:
                 agentName:
                   type: string
-                agentStatus:
-                  type: string
                 nodeStatus:
                   type: string
-                enabled:
-                  type: boolean
                 podStatus:
                   type: array
                   items:
@@ -45,3 +41,6 @@ spec:
                       lastCheck:
                         type: string
                         format: date-time
+                lastUpdate:
+                  type: string
+                  format: date-time

@@ -870,6 +870,7 @@ func createAgentCRDInstance(nodeName string) {
 				"agentName":  fmt.Sprintf("agent-%s", nodeName),
 				"nodeStatus": "Trusted",
 				"podStatus":  podStatus,
+				"lastUpdate": time.Now().Format(time.RFC3339),
 			},
 		},
 	}
@@ -936,6 +937,9 @@ spec:
                       lastCheck:
                         type: string
                         format: date-time
+                lastUpdate:
+                  type: string
+                  format: date-time
 `
 
 	tempFileName := "/tmp/crd.yaml"
@@ -981,14 +985,6 @@ func deleteAgentCRDInstance(nodeName string) {
 	}
 
 	fmt.Printf(yellow.Sprintf("[%s] Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentCRDName))
-}
-func getTenantIDFromPodName(podName string) string {
-
-	parts := strings.Split(podName, "-tenant-")
-
-	// The tenantID is the last part of the split array
-	tenantID := parts[len(parts)-1]
-	return tenantID
 }
 
 // Main function

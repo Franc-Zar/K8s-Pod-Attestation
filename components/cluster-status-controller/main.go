@@ -104,7 +104,7 @@ func watchAgentCRDChanges(stopCh chan os.Signal) {
 				fmt.Printf(green.Sprintf("[%s] Agent CRD Added:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatAgentCRD(event.Object)))
 			case watch.Modified:
 				fmt.Printf(blue.Sprintf("[%s] Agent CRD Modified:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatAgentCRD(event.Object)))
-				checkPodStatus(event.Object)
+				checkAgentStatus(event.Object)
 			case watch.Deleted:
 				fmt.Printf(yellow.Sprintf("[%s] Agent CRD Deleted:\n%s\n", time.Now().Format("02-01-2006 15:04:05"), formatAgentCRD(event.Object)))
 			case watch.Error:
@@ -145,18 +145,79 @@ func deletePod(podName string) error {
 	return nil
 }
 
-func checkPodStatus(obj interface{}) {
+func deleteAllPodsFromNode(nodeName string) {
+	// Get all pods on the specified node
+	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
+	})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error listing pods on node %s: %v", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
+		return
+	}
+
+	// Delete each pod on the node
+	for _, pod := range pods.Items {
+		err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+		if err != nil {
+			fmt.Printf(red.Sprintf("[%s] Error deleting pod %s in namespace %s: %v", time.Now().Format("02-01-2006 15:04:05"), pod.Name, pod.Namespace, err))
+			return
+		}
+		fmt.Printf(yellow.Sprintf("[%s] Deleted pod %s from untrusted node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
+	}
+
+	fmt.Printf(yellow.Sprintf("[%s] Deleted all pods from untrusted node %s", time.Now().Format("02-01-2006 15:04:05"), nodeName))
+}
+
+func deleteNode(nodeName string) {
+	// Delete the node
+	err := clientset.CoreV1().Nodes().Delete(context.TODO(), nodeName, metav1.DeleteOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error deleting Node %s: %v", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
+		return
+	}
+
+	fmt.Printf(yellow.Sprintf("[%s] Deleted untrusted node %s\n", time.Now().Format("02-01-2006 15:04:05"), nodeName))
+	return
+}
+
+func extractNodeName(agentName string) (string, error) {
+	// Define the prefix that precedes the nodeName
+	prefix := "agent-"
+
+	// Check if the agentName starts with the prefix
+	if len(agentName) > len(prefix) && agentName[:len(prefix)] == prefix {
+		// Extract the nodeName by removing the prefix
+		nodeName := agentName[len(prefix):]
+		return nodeName, nil
+	}
+
+	// Return an error if the agentName does not start with the expected prefix
+	return "", fmt.Errorf("invalid agentName format: %s", agentName)
+}
+
+func checkAgentStatus(obj interface{}) {
 	spec := formatAgentCRD(obj)
+
+	if spec["nodeStatus"] == "UNTRUSTED" {
+		nodeName, err := extractNodeName(spec["agentName"].(string))
+		if err != nil {
+			fmt.Printf(red.Sprintf("[%s] Error: 'agentName': %s syntax is not valid", time.Now().Format("02-01-2006 15:04:05"), spec["agentName"]))
+			return
+		}
+		deleteAllPodsFromNode(nodeName)
+		deleteNode(nodeName)
+		return
+	}
 
 	podStatusInterface, exists := spec["podStatus"]
 	if !exists {
-		fmt.Println(red.Println("Error: Missing 'podStatus' field in Agent CRD"))
+		fmt.Printf(red.Sprintf("[%s] Error: Missing 'podStatus' field in Agent CRD\n", time.Now().Format("02-01-2006 15:04:05")))
 		return
 	}
 
 	podStatus, ok := podStatusInterface.([]interface{})
 	if !ok {
-		fmt.Println(red.Println("Error: Unable to parse 'podStatus' field in Agent CRD"))
+		fmt.Printf(red.Sprintf("[%s] Error: Unable to parse 'podStatus' field in Agent CRD\n", time.Now().Format("02-01-2006 15:04:05")))
 		return
 	}
 
@@ -164,21 +225,22 @@ func checkPodStatus(obj interface{}) {
 		pod := ps.(map[string]interface{})
 		podName, ok := pod["podName"].(string)
 		if !ok {
-			fmt.Println(red.Println("Error: Unable to parse 'podName' field in podStatus"))
+			fmt.Printf(red.Sprintf("[%s] Error: Unable to parse 'podName' field in 'podStatus'\n", time.Now().Format("02-01-2006 15:04:05")))
 			continue
 		}
 		status, ok := pod["status"].(string)
 		if !ok {
-			fmt.Println(red.Println("Error: Unable to parse 'status' field in podStatus"))
+			fmt.Printf(red.Sprintf("[%s] Error: Unable to parse 'status' field in 'podStatus'\n", time.Now().Format("02-01-2006 15:04:05")))
 			continue
 		}
 
-		if status == "Untrusted" {
+		if status == "UNTRUSTED" {
 			fmt.Printf(yellow.Sprintf("[%s] Detected Untrusted Pod: %s\n", time.Now().Format("02-01-2006 15:04:05"), podName))
 			err := deletePod(podName)
 			if err != nil {
-				fmt.Printf(red.Sprintf("Error deleting pod: %v\n", err))
+				fmt.Printf(red.Sprintf("[%s] Error deleting pod: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 			}
+			fmt.Printf(yellow.Sprintf("[%s] Untrusted Pod: %s deleted\n", time.Now().Format("02-01-2006 15:04:05"), podName))
 		}
 	}
 }
