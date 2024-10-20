@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -101,18 +102,18 @@ type AttestationResult struct {
 
 // Color variables for output
 var (
-	red                  *color.Color
-	green                *color.Color
-	yellow               *color.Color
-	blue                 *color.Color
-	clientset            *kubernetes.Clientset
-	dynamicClient        dynamic.Interface
-	registrarHOST        string
-	registrarPORT        string
-	agentPORT            string
-	attestationNamespace string
-	whitelistHOST        string
-	whitelistPORT        string
+	red                          *color.Color
+	green                        *color.Color
+	yellow                       *color.Color
+	blue                         *color.Color
+	clientset                    *kubernetes.Clientset
+	dynamicClient                dynamic.Interface
+	registrarHOST                string
+	registrarPORT                string
+	attestationNamespaces        string
+	attestationEnabledNamespaces []string
+	whitelistHOST                string
+	whitelistPORT                string
 )
 
 // TEST PURPOSE
@@ -210,20 +211,24 @@ func initializeColors() {
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
-	agentPORT = getEnv("AGENT_PORT", "30000")
 	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
-	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
+	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
+	// setting namespaces allowed for attestation: only pods deployed within them can be attested
+	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
+	if err != nil {
+		log.Fatalf("Failed to parse 'ATTESTATION_NAMESPACES' content: %v", err)
+	}
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		if key == "ATTESTATION_NAMESPACE" {
-			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		if key == "ATTESTATION_NAMESPACES" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value: ['default']\n", time.Now().Format("02-01-2006 15:04:05"), key))
 		}
 		return defaultValue
 	}
@@ -270,18 +275,16 @@ func deleteAttestationRequestCRDInstance(crdObj interface{}) {
 		Resource: "attestationrequests", // plural name of the CRD
 	}
 
-	// Extract the namespace and name of the CRD from the unstructuredObj
-	namespace := unstructuredObj.GetNamespace()
 	resourceName := unstructuredObj.GetName()
 
 	// Delete the AttestationRequest CR in the given namespace
-	err := dynamicClient.Resource(gvr).Namespace(namespace).Delete(context.TODO(), resourceName, metav1.DeleteOptions{})
+	err := dynamicClient.Resource(gvr).Namespace("attestation-system").Delete(context.TODO(), resourceName, metav1.DeleteOptions{})
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to delete AttestationRequest: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
 
-	fmt.Printf(yellow.Sprintf("[%s] AttestationRequest: %s in namespace: %s deleted successfully\n", time.Now().Format("02-01-2006 15:04:05"), resourceName, namespace))
+	fmt.Printf(yellow.Sprintf("[%s] AttestationRequest: %s deleted successfully\n", time.Now().Format("02-01-2006 15:04:05"), resourceName))
 	return
 }
 
@@ -339,6 +342,26 @@ func extractNodeName(agentName string) (string, error) {
 
 	// Return an error if the agentName does not start with the expected prefix
 	return "", fmt.Errorf("invalid agentName format: %s", agentName)
+}
+
+// getNodePort returns the NodePort for a given service in a namespace
+func getAgentPort(agentName string) (string, error) {
+	agentServiceName := fmt.Sprintf("%s-service", agentName)
+
+	// Get the Service from the given namespace
+	service, err := clientset.CoreV1().Services("attestation-system").Get(context.TODO(), agentServiceName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get service: %v", err)
+	}
+
+	// Iterate through the service ports to find a NodePort
+	for _, port := range service.Spec.Ports {
+		if port.NodePort != 0 {
+			return string(port.NodePort), nil
+		}
+	}
+
+	return "", fmt.Errorf("no NodePort found for service %s", agentServiceName)
 }
 
 func podAttestation(obj interface{}) (*AttestationResult, error) {
@@ -420,7 +443,13 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 
 	attestationRequest.Signature = attestationRequestSignature
 
-	attestationResponse, err := sendAttestationRequestToAgent(agentIP, agentPORT, attestationRequest)
+	agentPort, err := getAgentPort(agentName)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error while sending Attestation Request to Agent: %s for pod: %s: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentName, podName, err.Error()))
+		return nil, fmt.Errorf("Error while sending Attestation Request to Agent: service port not found")
+	}
+
+	attestationResponse, err := sendAttestationRequestToAgent(agentIP, agentPort, attestationRequest)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while sending Attestation Request to Agent: %s for pod: %s: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentName, podName, err.Error()))
 		return nil, fmt.Errorf("Error while sending Attestation Request to Agent")
@@ -519,7 +548,7 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 // getPodImageByUID retrieves the image of a pod given its UID
 func getPodImageNameByUID(podUID string) (string, error) {
 	// List all pods in the cluster (you may want to filter by namespace in production)
-	pods, err := clientset.CoreV1().Pods(attestationNamespace).List(context.TODO(), metav1.ListOptions{})
+	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("failed to list pods: %v", err)
 	}
@@ -1042,10 +1071,10 @@ func updateAgentCRDWithAttestationResult(attestationResult *AttestationResult) {
 		Group:    "example.com", // The group from your CRD
 		Version:  "v1",          // The version of your CRD
 		Resource: "agents",      // The plural resource name from your CRD
-	}).Namespace("kube-system") // Modify namespace if needed
+	}).Namespace("attestation-system") // Modify namespace if needed
 
 	// Fetch the CRD instance for the given node
-	crdInstance, err := crdResource.Get(context.Background(), attestationNamespace, metav1.GetOptions{})
+	crdInstance, err := crdResource.Get(context.Background(), attestationResult.Agent, metav1.GetOptions{})
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error getting Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return

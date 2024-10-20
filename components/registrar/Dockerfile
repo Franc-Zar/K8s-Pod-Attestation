@@ -27,7 +27,7 @@ WORKDIR /app
 COPY --from=builder /app/registrar /app/registrar
 
 # Copy any necessary non-Go files (if needed)
-COPY tenants.db /app/tenants.db
+COPY registrar.db /app/registrar.db
 
 # Expose the port that the application will run on
 EXPOSE 8080

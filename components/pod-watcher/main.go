@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/fatih/color"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/homedir"
+	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,7 +25,8 @@ import (
 var clientset *kubernetes.Clientset
 var dynamicClient dynamic.Interface
 
-var attestationNamespace string
+var attestationNamespaces string
+var attestationEnabledNamespaces []string
 
 var (
 	red    *color.Color
@@ -34,19 +36,34 @@ var (
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
-	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
+	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[default]")
+	// setting namespaces allowed for attestation: only pods deployed within them can be attested
+	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
+	if err != nil {
+		log.Fatalf("Failed to parse 'ATTESTATION_NAMESPACES' content: %v", err)
+	}
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		if key == "ATTESTATION_NAMESPACE" {
-			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		if key == "ATTESTATION_NAMESPACES" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value: ['default']\n", time.Now().Format("02-01-2006 15:04:05"), key))
 		}
 		return defaultValue
 	}
 	return value
+}
+
+// isNamespaceEnabledForAttestation checks if the given podNamespace is enabled for attestation.
+func isNamespaceEnabledForAttestation(podNamespace string) bool {
+	for _, ns := range attestationEnabledNamespaces {
+		if ns == podNamespace {
+			return true
+		}
+	}
+	return false
 }
 
 // initializeColors sets up color variables for console output.
@@ -90,7 +107,7 @@ func nodeIsControlPlane(nodeName string) bool {
 func watchPods() {
 	fmt.Println(green.Sprintln("Watching Pod changes..."))
 
-	watcher, err := clientset.CoreV1().Pods(attestationNamespace).Watch(context.Background(), v1.ListOptions{})
+	watcher, err := clientset.CoreV1().Pods("").Watch(context.Background(), v1.ListOptions{})
 	if err != nil {
 		panic(err)
 	}
@@ -104,8 +121,9 @@ func watchPods() {
 				continue
 			}
 
+			podNamespace := pod.GetNamespace()
 			nodeName := pod.Spec.NodeName
-			if nodeName == "" || strings.Contains(pod.Name, "agent") || nodeIsControlPlane(nodeName) {
+			if !isNamespaceEnabledForAttestation(podNamespace) || nodeIsControlPlane(nodeName) {
 				continue
 			}
 
@@ -157,7 +175,7 @@ func updateAgentCRDWithPodStatus(nodeName, podName, tenantId, status string) {
 			"podName":   podName,
 			"tenantID":  tenantId,
 			"status":    status,
-			"reason":    "Newly created Pod is trusted by default",
+			"reason":    "Pod just created",
 			"lastCheck": time.Now().Format(time.RFC3339),
 		})
 	}

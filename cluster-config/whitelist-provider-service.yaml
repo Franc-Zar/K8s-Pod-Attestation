@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whitelist-provider
+  namespace: attestation-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whitelist-provider
+  template:
+    metadata:
+      labels:
+        app: whitelist-provider
+    spec:
+      containers:
+        - name: whitelist-provider
+          image: franczar/k8s-attestation-whitelist-provider:latest
+          env:
+            - name: WHITELIST_PORT
+              value: "9090"
+          ports:
+            - containerPort: 9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whitelist-provider-service
+spec:
+  selector:
+    app: whitelist-provider
+  ports:
+    - protocol: TCP
+      port: 9090
+      targetPort: 9090
+      nodePort: 30002
+  type: NodePort

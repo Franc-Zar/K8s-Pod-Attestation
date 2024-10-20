@@ -23,9 +23,15 @@ import (
 	"github.com/google/go-tpm/tpmutil"
 	"io"
 	"io/ioutil"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/homedir"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -35,8 +41,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -106,18 +110,19 @@ type VerifyTPMEKCertificateRequest struct {
 
 // Color variables for output
 var (
-	red                  *color.Color
-	green                *color.Color
-	yellow               *color.Color
-	clientset            *kubernetes.Clientset
-	dynamicClient        dynamic.Interface
-	attestationNamespace string
-	registrarPORT        string
-	registrarHOST        string
-	agentHOST            string
-	agentPORT            string
-	whitelistHOST        string
-	whitelistPORT        string
+	red                          *color.Color
+	green                        *color.Color
+	yellow                       *color.Color
+	clientset                    *kubernetes.Clientset
+	dynamicClient                dynamic.Interface
+	attestationNamespaces        string
+	attestationEnabledNamespaces []string
+	registrarPORT                string
+	registrarHOST                string
+	whitelistHOST                string
+	whitelistPORT                string
+	agentServicePortAllocation   int32 = 9090
+	agentNodePortAllocation      int32 = 40000
 )
 
 // initializeColors sets up color variables for console output.
@@ -131,20 +136,37 @@ func initializeColors() {
 func loadEnvironmentVariables() {
 	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
-	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
-	agentHOST = getEnv("AGENT_HOST", "10.0.2.13")
-	agentPORT = getEnv("AGENT_PORT", "30000")
+	attestationNamespaces = getEnv("ATTESTATION_NAMESPACE", "default")
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
+
+	// setting namespaces allowed for attestation: only pods deployed within them can be attested
+	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
+	if err != nil {
+		log.Fatalf("Failed to parse 'ATTESTATION_NAMESPACES' content: %v", err)
+	}
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
+		if key == "ATTESTATION_NAMESPACES" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value: ['default']\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		}
 		return defaultValue
 	}
 	return value
+}
+
+// isNamespaceEnabledForAttestation checks if the given podNamespace is enabled for attestation.
+func isNamespaceEnabledForAttestation(podNamespace string) bool {
+	for _, ns := range attestationEnabledNamespaces {
+		if ns == podNamespace {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper function to verify HMAC
@@ -158,6 +180,144 @@ func verifyHMAC(message, ephemeralKey, providedHMAC []byte) error {
 	}
 
 	return nil
+}
+
+func getWorkerInternalIP(newWorker *corev1.Node) (string, error) {
+	// Loop through the addresses of the node to find the InternalIP (within the cluster)
+	var workerIP string
+	for _, address := range newWorker.Status.Addresses {
+		if address.Type == v1.NodeInternalIP {
+			workerIP = address.Address
+			break
+		}
+	}
+	if workerIP == "" {
+		return "", fmt.Errorf("no internal IP found for node: %s", newWorker.GetName())
+	}
+	return workerIP, nil
+}
+
+func deployAgent(newWorker *corev1.Node) (bool, string, string) {
+	// config values
+	agentReplicas := int32(1)
+	privileged := true
+	charDeviceType := corev1.HostPathCharDev
+	pathFileType := corev1.HostPathFile
+
+	agentHOST, err := getWorkerInternalIP(newWorker)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to deploy Agent on Worker node: %s: Node has no internal IP\n", time.Now().Format("02-01-2006 15:04:05"), newWorker.GetName()))
+		return false, "", ""
+	}
+	// allocating ports for this agent deployment
+	agentPORT := agentNodePortAllocation
+	servicePORT := agentServicePortAllocation
+
+	// Define the Deployment
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("agent-%s-deployment", newWorker.GetName()),
+			Namespace: "attestation-system",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &agentReplicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "agent",
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "agent",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  fmt.Sprintf("agent-%s", newWorker.GetName()),
+							Image: "franczar/k8s-attestation-agent:latest",
+							Env: []corev1.EnvVar{
+								{Name: "AGENT_PORT", Value: "8080"},
+								{Name: "TPM_PATH", Value: "/dev/tpm0"},
+							},
+							Ports: []corev1.ContainerPort{
+								{ContainerPort: 8080},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "tpm-device", MountPath: "/dev/tpm0"},
+								{Name: "ima-measurements", MountPath: "/root/ascii_runtime_measurements", ReadOnly: true},
+							},
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: &privileged,
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "tpm-device",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/dev/tpm0",
+									Type: &charDeviceType,
+								},
+							},
+						},
+						{
+							Name: "ima-measurements",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/sys/kernel/security/integrity/ima/ascii_runtime_measurements",
+									Type: &pathFileType,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Define the Service
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("agent-%s-service", newWorker.GetName()),
+			Namespace: "attestation-system",
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app": "agent",
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Protocol:   corev1.ProtocolTCP,
+					Port:       servicePORT,
+					TargetPort: intstr.FromInt32(8080),
+					NodePort:   agentPORT,
+				},
+			},
+			Type: corev1.ServiceTypeNodePort,
+		},
+	}
+
+	// Deploy the Deployment
+	_, err = clientset.AppsV1().Deployments("attestation-system").Create(context.TODO(), deployment, metav1.CreateOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to create Agent deployment: %v", time.Now().Format("02-01-2006 15:04:05"), err))
+		return false, "", ""
+	}
+
+	// Deploy the Service
+	_, err = clientset.CoreV1().Services("attestation-system").Create(context.TODO(), service, metav1.CreateOptions{})
+	if err != nil {
+		log.Fatalf("[%s] Failed to create Agent service: %v", time.Now().Format("02-01-2006 15:04:05"), err)
+		return false, "", ""
+	}
+
+	fmt.Printf(green.Sprintf("[%s] Agent Deployment and Service successfully created", time.Now().Format("02-01-2006 15:04:05")))
+	agentNodePortAllocation += 1
+	agentServicePortAllocation += 1
+	return true, agentHOST, string(agentPORT)
 }
 
 // Encrypts data with the provided public key derived from the ephemeral key (EK)
@@ -202,7 +362,7 @@ func configureKubernetesClient() {
 
 // Watch for node events
 func watchNodes() {
-	watcher, err := clientset.CoreV1().Nodes().Watch(context.Background(), v1.ListOptions{})
+	watcher, err := clientset.CoreV1().Nodes().Watch(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		panic(err)
 	}
@@ -238,7 +398,7 @@ func nodeIsRegistered(nodeName string) bool {
 
 // deleteNode deletes the node from the Kubernetes cluster.
 func deleteNodeFromCluster(nodeName string) error {
-	err := clientset.CoreV1().Nodes().Delete(context.TODO(), nodeName, v1.DeleteOptions{})
+	err := clientset.CoreV1().Nodes().Delete(context.TODO(), nodeName, metav1.DeleteOptions{})
 	return err
 }
 
@@ -248,9 +408,19 @@ func handleNodeEvent(event watch.Event, node *corev1.Node) {
 	case watch.Added:
 		if !nodeIsControlPlane(node) && !nodeIsRegistered(node.Name) {
 			fmt.Printf(green.Sprintf("[%s] Worker node %s joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
-			if !workerRegistration(node) {
+
+			isAgentDeployed, agentHOST, agentPORT := deployAgent(node)
+			if !isAgentDeployed {
 				if deleteNodeFromCluster(node.Name) != nil {
 					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node %s the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+					return
+				}
+			}
+
+			if !workerRegistration(node, agentHOST, agentPORT) {
+				if deleteNodeFromCluster(node.Name) != nil {
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node %s the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+					return
 				}
 			}
 		}
@@ -259,6 +429,7 @@ func handleNodeEvent(event watch.Event, node *corev1.Node) {
 		if !nodeIsControlPlane(node) {
 			fmt.Printf(yellow.Sprintf("[%s] Worker node %s deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 			workerRemoval(node)
+			return
 		}
 	}
 }
@@ -341,11 +512,16 @@ func workerRemoval(node *corev1.Node) {
 		fmt.Printf(red.Sprintf("Error sending Worker Node removal request: %v\n", err))
 		return
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			return
+		}
+	}(resp.Body)
 
 	// Check the response status
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf(red.Sprintf("Failed to remove Worker Node from Registrar: received status code %d\n", resp.StatusCode))
+		fmt.Printf(red.Sprintf("[%s] Failed to remove Worker Node from Registrar: received status code %d\n", time.Now().Format("02-01-2006 15:04:05"), resp.StatusCode))
 		return
 	}
 
@@ -353,7 +529,7 @@ func workerRemoval(node *corev1.Node) {
 	deleteAgentCRDInstance(node.Name)
 }
 
-func waitForAgent(retryInterval, timeout time.Duration) error {
+func waitForAgent(retryInterval, timeout time.Duration, agentHOST, agentPORT string) error {
 	address := fmt.Sprintf("%s:%s", agentHOST, agentPORT)
 	start := time.Now()
 
@@ -362,7 +538,10 @@ func waitForAgent(retryInterval, timeout time.Duration) error {
 		conn, err := net.DialTimeout("tcp", address, retryInterval)
 		if err == nil {
 			// If the connection is successful, close it and return
-			conn.Close()
+			err := conn.Close()
+			if err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -391,19 +570,19 @@ func generateNonce(size int) (string, error) {
 }
 
 // workerRegistration registers the worker node by calling the identification API
-func workerRegistration(node *corev1.Node) bool {
+func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) bool {
 	agentIdentifyURL := fmt.Sprintf("http://%s:%s/agent/worker/identify", agentHOST, agentPORT)
 	agentChallengeNodeURL := fmt.Sprintf("http://%s:%s/agent/worker/challenge", agentHOST, agentPORT)
 	registrarWorkerCreationURL := fmt.Sprintf("http://%s:%s/worker/create", registrarHOST, registrarPORT)
 
-	err := waitForAgent(5*time.Second, 1*time.Minute)
+	err := waitForAgent(5*time.Second, 1*time.Minute, agentHOST, agentPORT)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while contacting Agent: %v\n", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
 		return false
 	}
 
 	// Call Agent to identify worker data
-	workerData, err := callAgentIdentify(agentIdentifyURL)
+	workerData, err := getWorkerRegistrationData(agentIdentifyURL)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to call Agent API: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
@@ -496,7 +675,7 @@ func workerRegistration(node *corev1.Node) bool {
 	}
 
 	workerWhitelistCheckRequest := WorkerWhitelistCheckRequest{
-		OsName:        node.Status.NodeInfo.OSImage,
+		OsName:        newWorker.Status.NodeInfo.OSImage,
 		BootAggregate: bootAggregate,
 		HashAlg:       hashAlg,
 	}
@@ -509,7 +688,7 @@ func workerRegistration(node *corev1.Node) bool {
 
 	workerNode := WorkerNode{
 		WorkerId: workerData.UUID,
-		Name:     node.GetName(),
+		Name:     newWorker.GetName(),
 		AIK:      workerData.AIK,
 	}
 
@@ -521,7 +700,7 @@ func workerRegistration(node *corev1.Node) bool {
 	}
 
 	fmt.Printf(green.Sprintf("[%s] Successfully registered Worker Node: %s\n", time.Now().Format("02-01-2006 15:04:05"), createWorkerResponse.WorkerId))
-	createAgentCRDInstance(node.Name)
+	createAgentCRDInstance(newWorker.Name)
 	return true
 }
 
@@ -587,7 +766,7 @@ func verifyBootAggregate(checkRequest WorkerWhitelistCheckRequest) error {
 }
 
 // Helper function to call the agent identification API
-func callAgentIdentify(url string) (*WorkerResponse, error) {
+func getWorkerRegistrationData(url string) (*WorkerResponse, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call agent identification API: %v", err)
@@ -828,7 +1007,7 @@ func createWorker(url string, workerNode *WorkerNode) (*NewWorkerResponse, error
 
 func createAgentCRDInstance(nodeName string) {
 	// Get the list of pods running on the specified node and attestation namespace
-	pods, err := clientset.CoreV1().Pods(attestationNamespace).List(context.TODO(), v1.ListOptions{
+	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 	})
 	if err != nil {
@@ -839,6 +1018,12 @@ func createAgentCRDInstance(nodeName string) {
 	// Prepare podStatus array for the Agent CRD spec
 	var podStatus []map[string]interface{}
 	for _, pod := range pods.Items {
+
+		// do not add pods that are not deployed within a namespace enabled for attestation
+		if !isNamespaceEnabledForAttestation(pod.GetNamespace()) {
+			continue
+		}
+
 		podName := pod.Name
 		tenantID := pod.Annotations["tenantID"]
 
@@ -851,8 +1036,8 @@ func createAgentCRDInstance(nodeName string) {
 		podStatus = append(podStatus, map[string]interface{}{
 			"podName":   podName,
 			"tenantID":  tenantID,
-			"status":    "Trusted",
-			"reason":    "Pod attestation successful",
+			"status":    "TRUSTED",
+			"reason":    "Agent just created",
 			"lastCheck": time.Now().Format(time.RFC3339),
 		})
 	}
@@ -864,11 +1049,11 @@ func createAgentCRDInstance(nodeName string) {
 			"kind":       "Agent",
 			"metadata": map[string]interface{}{
 				"name":      fmt.Sprintf("agent-%s", nodeName),
-				"namespace": "kube-system",
+				"namespace": "attestation-system",
 			},
 			"spec": map[string]interface{}{
 				"agentName":  fmt.Sprintf("agent-%s", nodeName),
-				"nodeStatus": "Trusted",
+				"nodeStatus": "TRUSTED",
 				"podStatus":  podStatus,
 				"lastUpdate": time.Now().Format(time.RFC3339),
 			},
@@ -883,7 +1068,7 @@ func createAgentCRDInstance(nodeName string) {
 	}
 
 	// Create the Agent CRD instance in the kube-system namespace
-	_, err = dynamicClient.Resource(gvr).Namespace("kube-system").Create(context.TODO(), agent, v1.CreateOptions{})
+	_, err = dynamicClient.Resource(gvr).Namespace("attestation-system").Create(context.TODO(), agent, metav1.CreateOptions{})
 	if err != nil {
 		fmt.Printf(yellow.Sprintf("[%s] Error creating Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
@@ -978,7 +1163,7 @@ func deleteAgentCRDInstance(nodeName string) {
 	}
 
 	// Delete the Agent CRD instance in the "kube-system" namespace
-	err := dynamicClient.Resource(gvr).Namespace("kube-system").Delete(context.TODO(), agentCRDName, v1.DeleteOptions{})
+	err := dynamicClient.Resource(gvr).Namespace("attestation-system").Delete(context.TODO(), agentCRDName, metav1.DeleteOptions{})
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error deleting Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return

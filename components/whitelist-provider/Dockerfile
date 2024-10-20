@@ -1,30 +1,38 @@
-# Use the official Go image to build the application
+# Stage 1: Build the Go application
 FROM golang:1.22 AS builder
 
-# Set the Current Working Directory inside the container
+# Create and set the working directory
 WORKDIR /app
 
-# Copy go.mod and go.sum files to the workspace
+# Copy the Go module files
 COPY go.mod go.sum ./
 
-# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
+# Download all dependencies
 RUN go mod download
 
-# Copy the rest of the application's source code
+# Copy the source code
 COPY . .
 
 # Build the Go application
-RUN go build -o whitelist-provider .
+RUN CGO_ENABLED=0 GOOS=linux go build -o whitelist_service .
 
-# Use a minimal Docker image for running the application
+# Stage 2: Run the Go application
 FROM alpine:latest
 
-# Install required packages (MongoDB dependencies)
-RUN apk --no-cache add ca-certificates
+# Install MongoDB client and bash
+RUN apk add --no-cache mongodb-tools bash
 
-# Copy the binary from the builder image
-COPY --from=build /app/main /whitelists-provider
+# Set the working directory
+WORKDIR /app/
 
-# Expose the port the app will run on
-# Command to run the executable
-CMD ["./whitelists-provider"]
+# Copy the built binary from the builder container
+COPY --from=builder /app/whitelist_service .
+
+# Set the environment variable for the whitelist service port
+ENV WHITELIST_PORT=9090
+
+# Expose the application's port
+EXPOSE 9090
+
+# Run the application
+CMD ["./whitelist_service"]

@@ -51,15 +51,16 @@ type AttestationRequest struct {
 
 // Global variables
 var (
-	red                  *color.Color
-	green                *color.Color
-	yellow               *color.Color
-	clientset            *kubernetes.Clientset
-	dynamicClient        dynamic.Interface
-	registrarHOST        string
-	registrarPORT        string
-	podHandlerPORT       string
-	attestationNamespace string
+	red                          *color.Color
+	green                        *color.Color
+	yellow                       *color.Color
+	clientset                    *kubernetes.Clientset
+	dynamicClient                dynamic.Interface
+	registrarHOST                string
+	registrarPORT                string
+	podHandlerPORT               string
+	attestationNamespaces        string
+	attestationEnabledNamespaces []string
 	//attestation secret is shared between Pod Handler and Verifier to avoid issuance of unauthentic attestation requests
 	attestationSecret = []byte("this_is_a_32_byte_long_secret_k")
 )
@@ -69,15 +70,21 @@ func loadEnvironmentVariables() {
 	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
 	podHandlerPORT = getEnv("POD_HANDLER_PORT", "8081")
-	attestationNamespace = getEnv("ATTESTATION_NAMESPACE", "default")
+	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
+
+	// setting namespaces allowed for attestation: only pods deployed within them can be attested
+	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
+	if err != nil {
+		log.Fatalf("Failed to parse 'ATTESTATION_NAMESPACES' content: %v", err)
+	}
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		if key == "ATTESTATION_NAMESPACE" {
-			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
+		if key == "ATTESTATION_NAMESPACES" {
+			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value: ['default']\n", time.Now().Format("02-01-2006 15:04:05"), key))
 		}
 		return defaultValue
 	}
@@ -89,6 +96,16 @@ func initializeColors() {
 	red = color.New(color.FgRed)
 	green = color.New(color.FgGreen)
 	yellow = color.New(color.FgYellow)
+}
+
+// isNamespaceEnabledForAttestation checks if the given podNamespace is enabled for attestation.
+func isNamespaceEnabledForAttestation(podNamespace string) bool {
+	for _, ns := range attestationEnabledNamespaces {
+		if ns == podNamespace {
+			return true
+		}
+	}
+	return false
 }
 
 // Secure Pod Deployment Handler
@@ -108,12 +125,12 @@ func securePodDeployment(c *gin.Context) {
 
 	if isValid {
 		if err := deployPod(req.Manifest, req.TenantName); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to deploy Pod"})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": fmt.Sprintf("Failed to deploy Pod: %v", err.Error())})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Pod successfully deployed"})
 	} else {
-		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Invalid signature"})
+		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Invalid signature over provided Pod Manifest"})
 	}
 }
 
@@ -151,7 +168,7 @@ func verifyTenantSignature(tenantName, message, signature string) (bool, error) 
 
 func getAttestationInformation(podName string) (string, string, string, error) {
 	// Retrieve the Pod from the Kubernetes API
-	pod, err := clientset.CoreV1().Pods(attestationNamespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	pod, err := clientset.CoreV1().Pods("").Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to retrieve Pod: %v", err.Error())
 	}
@@ -216,8 +233,8 @@ func deployPod(yamlContent, tenantName string) error {
 		return fmt.Errorf("failed to unmarshal YAML: %v", err.Error())
 	}
 
-	if pod.Namespace == "" {
-		pod.Namespace = "default"
+	if !isNamespaceEnabledForAttestation(pod.Namespace) {
+		return fmt.Errorf("failed to create Pod: provided Pod Namespace: '%s' is not included in namespaces enabled for attestation: %s", pod.Namespace, attestationEnabledNamespaces)
 	}
 
 	if pod.Annotations == nil {
@@ -280,8 +297,8 @@ func issueAttestationRequestCRD(podName, podUID, tenantId, agentName, agentIP, h
 		},
 	}
 
-	// Create the AttestationRequest CR in the default namespace
-	_, err := dynamicClient.Resource(gvr).Namespace(attestationNamespace).Create(context.TODO(), attestationRequest, metav1.CreateOptions{})
+	// Create the AttestationRequest CR in the attestation namespace
+	_, err := dynamicClient.Resource(gvr).Namespace("attestation-system").Create(context.TODO(), attestationRequest, metav1.CreateOptions{})
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to create AttestationRequest: %v", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
 		return err
@@ -369,7 +386,7 @@ func checkAgentCRD(agentCRDName, podName, tenantId string) error {
 	}
 
 	// Use the dynamic client to get the CRD by name
-	crd, err := dynamicClient.Resource(crdGVR).Namespace("kube-system").Get(context.TODO(), agentCRDName, metav1.GetOptions{})
+	crd, err := dynamicClient.Resource(crdGVR).Namespace("attestation-system").Get(context.TODO(), agentCRDName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to retrieve Agent CRD: %v", err.Error())
 	}

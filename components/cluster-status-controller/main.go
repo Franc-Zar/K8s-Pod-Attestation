@@ -136,7 +136,7 @@ func deletePod(podName string) error {
 		Group:    "",
 		Version:  "v1",
 		Resource: "pods",
-	}).Namespace(attestationNamespace).Delete(context.Background(), podName, metav1.DeleteOptions{})
+	}).Namespace("").Delete(context.Background(), podName, metav1.DeleteOptions{})
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error deleting pod %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
 		return err

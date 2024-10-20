@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: agent
+  namespace: attestation-system
 spec:
   replicas: 1
   selector:
@@ -23,7 +24,7 @@ spec:
             - name: TPM_PATH
               value: "/dev/tpm0"
           ports:
-            - containerPort: 8083
+            - containerPort: 8080
           volumeMounts:
             - name: tpm-device
               mountPath: /dev/tpm0
@@ -33,9 +34,6 @@ spec:
           securityContext:
             privileged: true  # Required to access TPM and IMA
       volumes:
-        - name: kube-config
-          hostPath:
-            path: /home/node/.kube
         - name: tpm-device
           hostPath:
             path: /dev/tpm0
@@ -55,6 +53,6 @@ spec:
   ports:
     - protocol: TCP
       port: 8083
-      targetPort: 8083
-      nodePort: 30000
+      targetPort: 8080
+      nodePort: 40000 
   type: NodePort

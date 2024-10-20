@@ -103,7 +103,7 @@ func openTPM() {
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
-	agentPORT = getEnv("AGENT_PORT", "8083")
+	agentPORT = getEnv("AGENT_PORT", "8080")
 	TPMPath = getEnv("TPM_PATH", "simulator")
 	IMAMeasurementLogPath = getEnv("IMA_PATH", "/root/ascii_runtime_measurements")
 }

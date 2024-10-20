@@ -21,9 +21,9 @@ spec:
             - name: REGISTRAR_PORT
               value: "30000"
             - name: POD_HANDLER_PORT
-              value: "8081"
+              value: "8080"
           ports:
-            - containerPort: 8081
+            - containerPort: 8080
           volumeMounts:
             - name: kube-config
               mountPath: /root/.kube
@@ -42,6 +42,6 @@ spec:
   ports:
     - protocol: TCP
       port: 8081
-      targetPort: 8081
+      targetPort: 8080
       nodePort: 30001
   type: NodePort
