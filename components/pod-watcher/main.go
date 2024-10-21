@@ -36,7 +36,7 @@ var (
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
-	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[default]")
+	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
 	// setting namespaces allowed for attestation: only pods deployed within them can be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
 	if err != nil {

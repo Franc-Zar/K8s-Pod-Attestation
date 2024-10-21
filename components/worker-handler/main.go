@@ -137,7 +137,7 @@ func initializeColors() {
 func loadEnvironmentVariables() {
 	registrarHOST = getEnv("REGISTRAR_HOST", "localhost")
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
-	attestationNamespaces = getEnv("ATTESTATION_NAMESPACE", "default")
+	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
 
