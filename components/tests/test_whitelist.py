@@ -1,5 +1,4 @@
 import json
-
 import requests
 
 # Base URL of the server
@@ -10,23 +9,23 @@ headers = {'Content-Type': 'application/json'}
 
 # Test data for storing a worker whitelist
 store_worker_data = {
-    "osName": "Ubuntu 20.04.6 LTS",
+    "osName": "Debian GNU/Linux 12 (bookworm)",
     "validDigests": {
         "SHA1": [],
-        "SHA256": ["5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"]
+        "SHA256": ["7b6436b0c98f62380866d9432c2af0ee08ce16a171bda6951aecd95ee1307d61"]
     }
 }
 
 # Test data for checking a worker whitelist
 check_worker_data = {
-    "osName": "Ubuntu 20.04.6 LTS",
-    "bootAggregate": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+    "osName": "Debian GNU/Linux 12 (bookworm)",
+    "bootAggregate": "7b6436b0c98f62380866d9432c2af0ee08ce16a171bda6951aecd95ee1307d61",
     "hashAlg": "SHA256"
 }
 
 # Test data for appending new OS to the worker whitelist
 worker_data_to_append = {
-    "osName": "Ubuntu 22.04.6 LTS",
+    "osName": "Debian GNU/Linux 12 (bookworm)",
     "validDigests": {
         "SHA1": [],
         "SHA256": ["6341e6b2646a79a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af2"]
@@ -132,8 +131,8 @@ def delete_file_from_pod_whitelist(image_name, file_path):
 
 # Running the tests
 if __name__ == "__main__":
-    #add_worker_whitelist()      # Test adding worker whitelist
-    #check_worker_whitelist()    # Test checking worker whitelist
+    append_pod_whitelist()      # Test adding worker whitelist
+    check_worker_whitelist()    # Test checking worker whitelist
     #delete_os_from_worker_whitelist("Ubuntu 22.04.6 LTS")
     #append_worker_whitelist()   # Test appending new OS to worker whitelist
     append_pod_whitelist()         # Test adding pod whitelist

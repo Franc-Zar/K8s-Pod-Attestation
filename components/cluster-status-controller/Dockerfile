@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o pod-status-controller .
+RUN CGO_ENABLED=0 GOOS=linux go build -o cluster-status-controller .
 
 # Use a minimal base image for the final container
 FROM alpine:latest
@@ -23,7 +23,7 @@ FROM alpine:latest
 WORKDIR /app
 
 # Copy the binary built in the previous stage
-COPY --from=builder /app/pod-status-controller .
+COPY --from=builder /app/cluster-status-controller .
 
 # Run the controller binary
-CMD ["./pod-status-controller"]
+CMD ["./cluster-status-controller"]

@@ -28,6 +28,9 @@ WORKDIR /app/
 # Copy the built binary from the builder container
 COPY --from=builder /app/whitelist_service .
 
+# Set the environment variable for MongoDB URI
+ENV MONGODB_URI="mongodb://mongo:27017"
+
 # Expose the application's port
 EXPOSE 8080
 

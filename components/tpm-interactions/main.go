@@ -468,6 +468,9 @@ func main() {
 		log.Fatalf("Certificate is not valid: %v", err)
 	}
 	log.Printf("Valid certificate tpm")
+
+	port := fmt.Sprintf("%d", int32(31000))
+	log.Printf(port)
 }
 
 // Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs

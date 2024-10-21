@@ -19,10 +19,13 @@ spec:
           env:
             - name: WHITELIST_PORT
               value: "8080"
+            - name: WHITELIST_DB_URI
+              value: "mongodb://whitelist-db-service:27017" # MongoDB connection URI
           ports:
             - containerPort: 8080
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
+
 ---
 apiVersion: v1
 kind: Service
@@ -38,3 +41,47 @@ spec:
       targetPort: 8080
       nodePort: 30002
   type: NodePort
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whitelist-db-deployment
+  namespace: attestation-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whitelist-db
+  template:
+    metadata:
+      labels:
+        app: whitelist-db
+    spec:
+      containers:
+        - name: whitelist-db
+          image: mongo:latest
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - mountPath: /root/whitelist-db
+              name: whitelist-storage
+      volumes:
+        - name: whitelist-storage
+          emptyDir: {}
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whitelist-db-service
+  namespace: attestation-system
+spec:
+  ports:
+    - port: 27017
+      targetPort: 27017
+      protocol: TCP
+  selector:
+    app: whitelist-db

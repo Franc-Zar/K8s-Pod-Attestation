@@ -61,11 +61,13 @@ var (
 	workerWhitelist *mongo.Collection
 	podWhitelist    *mongo.Collection
 	whitelistPORT   string
+	whitelistURI    string
 )
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
+	whitelistURI = getEnv("WHITELIST_DB_URI", "mongodb://localhost:27017")
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
@@ -193,7 +195,7 @@ func dropWorkerWhitelist(c *gin.Context) {
 
 // initializeMongoDB connects to the MongoDB database and sets the workerWhitelist collection.
 func initializeMongoDB() {
-	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	clientOptions := options.Client().ApplyURI(whitelistURI)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

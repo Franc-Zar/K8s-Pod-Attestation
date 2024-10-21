@@ -71,18 +71,4 @@ spec:
             - containerPort: 8080
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: worker-handler-service
-  namespace: attestation-system
-spec:
-  selector:
-    app: worker-handler
-  ports:
-    - protocol: TCP
-      port: 8083
-      targetPort: 8080
-      nodePort: 30003
-  type: NodePort
+        
