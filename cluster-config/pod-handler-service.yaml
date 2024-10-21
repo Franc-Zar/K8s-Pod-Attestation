@@ -19,6 +19,9 @@ rules:
   - apiGroups: ["example.com"]  # Change this to your specific CRD group
     resources: ["agents"]  # Add your CRD resources here
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["example.com"]  # Change this to your specific CRD group
+    resources: ["attestationrequests"]  # Add your CRD resources here
+    verbs: ["get", "list", "watch", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
