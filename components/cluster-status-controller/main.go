@@ -84,7 +84,7 @@ func watchAgentCRDChanges(stopCh chan os.Signal) {
 	}
 
 	// Start watching for changes to the CRD
-	watcher, err := dynamicClient.Resource(crdGVR).Watch(context.Background(), metav1.ListOptions{})
+	watcher, err := dynamicClient.Resource(crdGVR).Namespace("attestation-system").Watch(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		panic(err.Error())
 	}

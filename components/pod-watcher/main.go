@@ -129,7 +129,7 @@ func watchPods() {
 
 			switch event.Type {
 			case watch.Added:
-				fmt.Printf(green.Sprintf("[%s] Pod %s added to node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
+				fmt.Printf(green.Sprintf("[%s] Pod %s added to node '%s'\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
 				updateAgentCRDWithPodStatus(nodeName, pod.Name, pod.Annotations["tenantID"], "TRUSTED")
 
 			case watch.Deleted:

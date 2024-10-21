@@ -249,7 +249,7 @@ func deployPod(yamlContent, tenantName string) error {
 		return fmt.Errorf("failed to create Pod: %v", err.Error())
 	}
 
-	fmt.Printf(green.Sprintf("[%s] Pod %s created successfully in namespace %s\n", time.Now().Format("02-01-2006 15:04:05"), result.GetObjectMeta().GetName(), result.GetNamespace()))
+	fmt.Printf(green.Sprintf("[%s] Pod '%s' created successfully in namespace '%s': deployed on Worker node '%s'\n", time.Now().Format("02-01-2006 15:04:05"), result.GetObjectMeta().GetName(), result.GetNamespace(), result.Spec.NodeName))
 	return nil
 }
 
