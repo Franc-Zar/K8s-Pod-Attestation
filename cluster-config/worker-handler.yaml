@@ -10,6 +10,9 @@ kind: ClusterRole
 metadata:
   name: worker-handler-role
 rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: [""]
     resources: ["pods", "services"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
