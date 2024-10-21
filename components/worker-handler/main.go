@@ -123,7 +123,7 @@ var (
 	whitelistHOST                string
 	whitelistPORT                string
 	agentServicePortAllocation   int32 = 9090
-	agentNodePortAllocation      int32 = 40000
+	agentNodePortAllocation      int32 = 31000
 )
 
 // initializeColors sets up color variables for console output.
@@ -304,18 +304,18 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 	// Deploy the Deployment
 	_, err = clientset.AppsV1().Deployments("attestation-system").Create(context.TODO(), deployment, metav1.CreateOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to create Agent deployment: %v", time.Now().Format("02-01-2006 15:04:05"), err))
+		fmt.Printf(red.Sprintf("[%s] Failed to create Agent deployment: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false, "", ""
 	}
 
 	// Deploy the Service
 	_, err = clientset.CoreV1().Services("attestation-system").Create(context.TODO(), service, metav1.CreateOptions{})
 	if err != nil {
-		log.Fatalf("[%s] Failed to create Agent service: %v", time.Now().Format("02-01-2006 15:04:05"), err)
+		log.Fatalf("[%s] Failed to create Agent service: %v\n", time.Now().Format("02-01-2006 15:04:05"), err)
 		return false, "", ""
 	}
 
-	fmt.Printf(green.Sprintf("[%s] Agent Deployment and Service successfully created", time.Now().Format("02-01-2006 15:04:05")))
+	fmt.Printf(green.Sprintf("[%s] Agent Deployment and Service successfully created\n", time.Now().Format("02-01-2006 15:04:05")))
 	agentNodePortAllocation += 1
 	agentServicePortAllocation += 1
 	return true, agentHOST, string(agentPORT)
@@ -410,31 +410,77 @@ func handleNodeEvent(event watch.Event, node *corev1.Node) {
 	switch event.Type {
 	case watch.Added:
 		if !nodeIsControlPlane(node) && !nodeIsRegistered(node.Name) {
-			fmt.Printf(green.Sprintf("[%s] Worker node %s joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+			fmt.Printf(green.Sprintf("[%s] Worker node '%s' joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 
 			isAgentDeployed, agentHOST, agentPORT := deployAgent(node)
 			if !isAgentDeployed {
-				if deleteNodeFromCluster(node.Name) != nil {
-					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node %s the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
-					return
+				err := deleteAgent(node.Name)
+				if err != nil {
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Agent deployed on Worker node '%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
+				}
+
+				err = deleteNodeFromCluster(node.Name)
+				if err != nil {
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node '%s' from the cluster: %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
 				}
 			}
 
 			if !workerRegistration(node, agentHOST, agentPORT) {
-				if deleteNodeFromCluster(node.Name) != nil {
-					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node %s the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
-					return
+				err := deleteAgent(node.Name)
+				if err != nil {
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Agent deployed on Worker node '%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), node, err))
+				}
+
+				err = deleteNodeFromCluster(node.Name)
+				if err != nil {
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node '%s' from the cluster: %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
 				}
 			}
 		}
 
 	case watch.Deleted:
 		if !nodeIsControlPlane(node) {
-			fmt.Printf(yellow.Sprintf("[%s] Worker node %s deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
-			workerRemoval(node)
-			return
+			fmt.Printf(yellow.Sprintf("[%s] Worker node '%s' deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+
+			err := deleteAgent(node.Name)
+			if err != nil {
+				fmt.Printf(red.Sprintf("[%s] Failed to delete Agent deployed on Worker node '%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
+			}
+
+			err = workerRemoval(node.Name)
+			if err != nil {
+				fmt.Printf(red.Sprintf("[%s] Failed to remove Worker '%s' from Registrar database: %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
+			}
+
+			err = deleteAgentCRDInstance(node.Name)
+			if err != nil {
+				fmt.Printf(red.Sprintf("[%s] Failed to delete Agent CRD instance 'agent-%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
+			}
 		}
 	}
+}
+
+func deleteAgent(removedWorkerName string) error {
+	// Define the names of the Deployment and Service based on the worker name
+	deploymentName := fmt.Sprintf("agent-%s-deployment", removedWorkerName)
+	serviceName := fmt.Sprintf("agent-%s-service", removedWorkerName)
+
+	// Delete the Service
+	err := clientset.CoreV1().Services("attestation-system").Delete(context.TODO(), serviceName, metav1.DeleteOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to delete Agent service: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return fmt.Errorf("Failed to delete Agent service: %v", err)
+	}
+	fmt.Printf(green.Sprintf("[%s] Agent Service '%s' successfully deleted\n", time.Now().Format("02-01-2006 15:04:05"), serviceName))
+
+	// Delete the Deployment
+	err = clientset.AppsV1().Deployments("attestation-system").Delete(context.TODO(), deploymentName, metav1.DeleteOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to delete Agent deployment: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return fmt.Errorf("Failed to delete Agent deplooyment: %v", err)
+	}
+	fmt.Printf(yellow.Sprintf("[%s] Agent Deployment '%s' successfully deleted\n", time.Now().Format("02-01-2006 15:04:05"), deploymentName))
+	return nil
 }
 
 // Check if Node being considered is Control Plane
@@ -498,22 +544,21 @@ func generateEphemeralKey(size int) ([]byte, error) {
 	return key, nil
 }
 
-func workerRemoval(node *corev1.Node) {
-	registrarWorkerDeletionURL := fmt.Sprintf("http://%s:%s/worker/deleteByName?name=%s", registrarHOST, registrarPORT, node.GetName())
+func workerRemoval(removedWorkerName string) error {
+	registrarWorkerDeletionURL := fmt.Sprintf("http://%s:%s/worker/deleteByName?name=%s", registrarHOST, registrarPORT, removedWorkerName)
 
 	// Create a new HTTP request
 	req, err := http.NewRequest(http.MethodDelete, registrarWorkerDeletionURL, nil)
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error creating Worker Node removal request: %v\n", err))
-		return
-	}
+		return fmt.Errorf("Error creating Worker Node removal request: %v\n", err)
 
+	}
 	// Send the request using the default HTTP client
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error sending Worker Node removal request: %v\n", err))
-		return
+		return fmt.Errorf("Error sending Worker Node removal request: %v\n", err)
+
 	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
@@ -524,12 +569,11 @@ func workerRemoval(node *corev1.Node) {
 
 	// Check the response status
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf(red.Sprintf("[%s] Failed to remove Worker Node from Registrar: received status code %d\n", time.Now().Format("02-01-2006 15:04:05"), resp.StatusCode))
-		return
+		return fmt.Errorf(red.Sprintf("Failed to remove Worker Node from Registrar: received status code %d\n", resp.StatusCode))
 	}
 
-	fmt.Printf(yellow.Sprintf("[%s] Worker Node: %s removed from Registrar with success\n", time.Now().Format("02-01-2006 15:04:05"), node.GetName()))
-	deleteAgentCRDInstance(node.Name)
+	fmt.Printf(yellow.Sprintf("[%s] Worker Node: %s removed from Registrar with success\n", time.Now().Format("02-01-2006 15:04:05"), removedWorkerName))
+	return nil
 }
 
 func waitForAgent(retryInterval, timeout time.Duration, agentHOST, agentPORT string) error {
@@ -1163,7 +1207,7 @@ func deployAgentCRD() {
 	fmt.Printf(green.Sprintf("[%s] CRD '%s' created successfully\n", time.Now().Format("02-01-2006 15:04:05"), agentCRD.Name))
 }
 
-func deleteAgentCRDInstance(nodeName string) {
+func deleteAgentCRDInstance(nodeName string) error {
 	// Construct the name of the Agent CRD based on the node name
 	agentCRDName := fmt.Sprintf("agent-%s", nodeName)
 
@@ -1177,11 +1221,11 @@ func deleteAgentCRDInstance(nodeName string) {
 	// Delete the Agent CRD instance in the "kube-system" namespace
 	err := dynamicClient.Resource(gvr).Namespace("attestation-system").Delete(context.TODO(), agentCRDName, metav1.DeleteOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error deleting Agent CRD instance: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return
-	}
+		return fmt.Errorf("Error deleting Agent CRD instance: %v\n", err)
 
-	fmt.Printf(yellow.Sprintf("[%s] Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentCRDName))
+	}
+	fmt.Printf(yellow.Sprintf("Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentCRDName))
+	return nil
 }
 
 // Main function
