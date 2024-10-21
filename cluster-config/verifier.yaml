@@ -18,7 +18,7 @@ spec:
           image: franczar/k8s-attestation-pod-verifier:latest
           volumeMounts:
             - name: kube-config
-          mountPath: /root/.kube
+              mountPath: /root/.kube
       volumes:
         - name: kube-config
           hostPath:
