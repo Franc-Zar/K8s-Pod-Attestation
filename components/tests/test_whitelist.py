@@ -2,7 +2,7 @@ import json
 import requests
 
 # Base URL of the server
-BASE_URL = "http://localhost:9090"
+BASE_URL = "http://localhost:30002"
 
 # Headers for requests
 headers = {'Content-Type': 'application/json'}
@@ -131,7 +131,7 @@ def delete_file_from_pod_whitelist(image_name, file_path):
 
 # Running the tests
 if __name__ == "__main__":
-    append_pod_whitelist()      # Test adding worker whitelist
+    append_worker_whitelist()      # Test adding worker whitelist
     check_worker_whitelist()    # Test checking worker whitelist
     #delete_os_from_worker_whitelist("Ubuntu 22.04.6 LTS")
     #append_worker_whitelist()   # Test appending new OS to worker whitelist
