@@ -1,0 +1,63 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-status-controller-sa
+  namespace: attestation-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-status-controller-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "delete"] 
+  - apiGroups: ["example.com"]  
+    resources: ["agents"]  
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-status-controller-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-status-controller-role
+subjects:
+  - kind: ServiceAccount
+    name: cluster-status-controller-sa
+    namespace: attestation-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-status-controller
+  namespace: attestation-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-status-controller
+  template:
+    metadata:
+      labels:
+        app: cluster-status-controller
+    spec:
+      containers:
+        - name: cluster-status-controller
+          image: franczar/k8s-attestation-cluster-status-controller:latest
+          volumeMounts:
+            - name: kube-config
+              mountPath: /root/.kube
+      volumes:
+        - name: kube-config
+          hostPath:
+            path: /home/node/.kube # Ensure this is the correct path on the control plane node
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      serviceAccountName: cluster-status-controller-sa
