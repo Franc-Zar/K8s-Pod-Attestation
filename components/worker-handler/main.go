@@ -22,10 +22,11 @@ import (
 	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 	"io"
-	"io/ioutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsv1clientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,7 +36,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -115,6 +115,7 @@ var (
 	yellow                       *color.Color
 	clientset                    *kubernetes.Clientset
 	dynamicClient                dynamic.Interface
+	apiExtensionsClient          *apiextensionsv1clientset.Clientset
 	attestationNamespaces        string
 	attestationEnabledNamespaces []string
 	registrarPORT                string
@@ -355,6 +356,8 @@ func configureKubernetesClient() {
 	}
 	dynamicClient = dynamic.NewForConfigOrDie(config)
 	clientset, err = kubernetes.NewForConfig(config)
+	apiExtensionsClient, err = apiextensionsv1clientset.NewForConfig(config)
+
 	if err != nil {
 		panic(err)
 	}
@@ -1078,77 +1081,86 @@ func createAgentCRDInstance(nodeName string) {
 }
 
 func deployAgentCRD() {
-	yamlContent := `
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: agents.example.com
-spec:
-  group: example.com
-  names:
-    kind: Agent
-    listKind: AgentList
-    plural: agents
-    singular: agent
-  scope: Namespaced
-  versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              properties:
-                agentName:
-                  type: string
-                nodeStatus:
-                  type: string
-                podStatus:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      podName:
-                        type: string
-                      tenantID:
-                        type: string
-                      status:
-                        type: string
-                      reason:
-                        type: string
-                      lastCheck:
-                        type: string
-                        format: date-time
-                lastUpdate:
-                  type: string
-                  format: date-time
-`
+	// Define the CustomResourceDefinition
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "agents.example.com",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "Agent",
+				ListKind: "AgentList",
+				Plural:   "agents",
+				Singular: "agent",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"agentName": {
+											Type: "string",
+										},
+										"nodeStatus": {
+											Type: "string",
+										},
+										"podStatus": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"podName": {
+															Type: "string",
+														},
+														"tenantID": {
+															Type: "string",
+														},
+														"status": {
+															Type: "string",
+														},
+														"reason": {
+															Type: "string",
+														},
+														"lastCheck": {
+															Type:   "string",
+															Format: "date-time",
+														},
+													},
+												},
+											},
+										},
+										"lastUpdate": {
+											Type:   "string",
+											Format: "date-time",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 
-	tempFileName := "/tmp/crd.yaml"
-	err := ioutil.WriteFile(tempFileName, []byte(yamlContent), 0644)
+	// Create the CRD
+	agentCRD, err := apiExtensionsClient.ApiextensionsV1().CustomResourceDefinitions().Create(context.TODO(), crd, metav1.CreateOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("Error writing to file: %v\n", err))
+		fmt.Printf(red.Sprintf("[%s] Error creating Agent CRD: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return
 	}
-	defer func() {
-		err := os.Remove(tempFileName)
-		if err != nil && !os.IsNotExist(err) {
-			fmt.Printf(red.Sprintf("Error cleaning up temporary file: %v\n", err))
-		}
-	}()
 
-	cmd := exec.Command("kubectl", "apply", "-f", tempFileName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf(red.Sprintf("Error applying YAML file: %v\n", err))
-		fmt.Println(red.Println(string(output)))
-		return
-	}
-
-	fmt.Printf(green.Sprintf("[%s] CRD 'agents.example.com' created successfully\n", time.Now().Format("02-01-2006 15:04:05")))
+	fmt.Printf(green.Sprintf("[%s] CRD '%s' created successfully\n", time.Now().Format("02-01-2006 15:04:05"), agentCRD.Name))
 }
 
 func deleteAgentCRDInstance(nodeName string) {

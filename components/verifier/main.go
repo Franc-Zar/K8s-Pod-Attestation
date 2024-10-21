@@ -19,7 +19,8 @@ import (
 	pb "github.com/google/go-tpm-tools/proto/tpm"
 	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
 	"io"
-	"io/ioutil"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsv1clientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +34,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -108,6 +108,7 @@ var (
 	blue                         *color.Color
 	clientset                    *kubernetes.Clientset
 	dynamicClient                dynamic.Interface
+	apiExtensionsClient          *apiextensionsv1clientset.Clientset
 	registrarHOST                string
 	registrarPORT                string
 	attestationNamespaces        string
@@ -248,6 +249,7 @@ func configureKubernetesClient() {
 	}
 	dynamicClient = dynamic.NewForConfigOrDie(config)
 	clientset, err = kubernetes.NewForConfig(config)
+	apiExtensionsClient, err = apiextensionsv1clientset.NewForConfig(config)
 	if err != nil {
 		panic(err)
 	}
@@ -1000,69 +1002,72 @@ func formatCRD(obj interface{}) map[string]interface{} {
 }
 
 func deployAttestationRequestCRD() {
-	yamlContent := `
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: attestationrequests.example.com  
-spec:
-  group: example.com
-  names:
-    kind: AttestationRequest
-    listKind: AttestationRequestList
-    plural: attestationrequests   
-    singular: attestationrequest  
-  scope: Namespaced
-  versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              properties:
-                podName:
-                  type: string
-                podUID:
-                  type: string
-                tenantID:
-                  type: string
-                agentName:
-                  type: string
-                agentIP:
-                  type: string
-                issued:
-                  type: string
-                  format: date-time
-                hmac:
-                  type: string
-`
-
-	tempFileName := "/tmp/crd.yaml"
-	err := ioutil.WriteFile(tempFileName, []byte(yamlContent), 0644)
-	if err != nil {
-		fmt.Printf(red.Sprintf("Error writing to file: %v\n", err))
-		return
-	}
-	defer func() {
-		err := os.Remove(tempFileName)
-		if err != nil && !os.IsNotExist(err) {
-			fmt.Printf(red.Sprintf("Error cleaning up temporary file: %v\n", err))
-		}
-	}()
-
-	cmd := exec.Command("kubectl", "apply", "-f", tempFileName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf(red.Sprintf("Error applying YAML file: %v\n", err))
-		fmt.Println(red.Println(string(output)))
-		return
+	// Define the CustomResourceDefinition
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "attestationrequests.example.com",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "AttestationRequest",
+				ListKind: "AttestationRequestList",
+				Plural:   "attestationrequests",
+				Singular: "attestationrequest",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"podName": {
+											Type: "string",
+										},
+										"podUID": {
+											Type: "string",
+										},
+										"tenantID": {
+											Type: "string",
+										},
+										"agentName": {
+											Type: "string",
+										},
+										"agentIP": {
+											Type: "string",
+										},
+										"issued": {
+											Type:   "string",
+											Format: "date-time",
+										},
+										"hmac": {
+											Type: "string",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
-	fmt.Printf(green.Sprintf("[%s] CRD 'attestationRequest.example.com' created successfully\n", time.Now().Format("02-01-2006 15:04:05")))
+	// Create the CRD
+	attestationRequestCRD, err := apiExtensionsClient.ApiextensionsV1().CustomResourceDefinitions().Create(context.TODO(), crd, metav1.CreateOptions{})
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Error creating Attestation Request CRD: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return
+	}
+
+	fmt.Printf(green.Sprintf("[%s] CRD '%s' created successfully\n", time.Now().Format("02-01-2006 15:04:05"), attestationRequestCRD.Name))
 }
 
 func updateAgentCRDWithAttestationResult(attestationResult *AttestationResult) {

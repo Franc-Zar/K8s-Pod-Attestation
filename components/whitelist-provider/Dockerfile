@@ -28,11 +28,8 @@ WORKDIR /app/
 # Copy the built binary from the builder container
 COPY --from=builder /app/whitelist_service .
 
-# Set the environment variable for the whitelist service port
-ENV WHITELIST_PORT=9090
-
 # Expose the application's port
-EXPOSE 9090
+EXPOSE 8080
 
 # Run the application
 CMD ["./whitelist_service"]

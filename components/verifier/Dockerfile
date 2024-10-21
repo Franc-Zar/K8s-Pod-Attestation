@@ -1,4 +1,4 @@
-# Use a Golang base image for building the application
+# Use a Golang base image
 FROM golang:1.22 AS builder
 
 # Set the working directory inside the container
@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o worker-handler .
+RUN CGO_ENABLED=0 GOOS=linux go build -o verifier .
 
 # Use a minimal base image for the final container
 FROM alpine:latest
@@ -23,7 +23,7 @@ FROM alpine:latest
 WORKDIR /app
 
 # Copy the binary built in the previous stage
-COPY --from=builder /app/worker-handler .
+COPY --from=builder /app/verifier .
 
 # Run the controller binary
-CMD ["./worker-handler"]
+CMD ["./verifier"]

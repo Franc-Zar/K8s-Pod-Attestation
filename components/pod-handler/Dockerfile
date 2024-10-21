@@ -24,7 +24,7 @@ WORKDIR /app
 COPY --from=builder /app/pod-handler .
 
 # Expose the port that the application will run on
-EXPOSE 8081
+EXPOSE 8080
 
 # Run the Go application
 CMD ["./pod-handler"]

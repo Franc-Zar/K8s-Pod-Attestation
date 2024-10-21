@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o crd-agent-controller .
+RUN CGO_ENABLED=0 GOOS=linux go build -o pod-status-controller .
 
 # Use a minimal base image for the final container
 FROM alpine:latest
@@ -23,7 +23,7 @@ FROM alpine:latest
 WORKDIR /app
 
 # Copy the binary built in the previous stage
-COPY --from=builder /app/crd-agent-controller .
+COPY --from=builder /app/pod-status-controller .
 
 # Run the controller binary
-CMD ["./crd-agent-controller"]
+CMD ["./pod-status-controller"]
