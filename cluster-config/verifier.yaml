@@ -54,7 +54,7 @@ spec:
       serviceAccountName: verifier-sa
       containers:
         - name: verifier
-          image: franczar/k8s-attestation-pod-verifier:latest
+          image: franczar/k8s-attestation-verifier:latest
           volumeMounts:
             - name: kube-config
               mountPath: /root/.kube
