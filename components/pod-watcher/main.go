@@ -37,7 +37,7 @@ var (
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
 	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
-	// setting namespaces allowed for attestation: only pods deployed within them can be attested
+	// setting namespaces allowed for attestation: only pods deployed  be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
 	if err != nil {
 		log.Fatalf("Failed to parse 'ATTESTATION_NAMESPACES' content: %v", err)
@@ -146,7 +146,7 @@ func updateAgentCRDWithPodStatus(nodeName, podName, tenantId, status string) {
 		Group:    "example.com",
 		Version:  "v1",
 		Resource: "agents",
-	}).Namespace("kube-system")
+	}).Namespace("attestation-system")
 	crdInstance, err := crdResource.Get(context.Background(), "agent-"+nodeName, v1.GetOptions{})
 	if err != nil {
 		fmt.Printf(red.Sprintf("Error getting Agent CRD instance: %v\n", err))
