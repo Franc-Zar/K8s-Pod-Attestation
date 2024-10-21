@@ -60,15 +60,14 @@ spec:
           image: franczar/k8s-attestation-worker-handler:latest
           env:
             - name: REGISTRAR_HOST
-              value: "localhost"
+              value: "192.168.0.103"
             - name: REGISTRAR_PORT
               value: "30000"
             - name: WHITELIST_HOST
-              value: "localhost"
+              value: "192.168.0.103"
             - name: WHITELIST_PORT
               value: "30002"
           ports:
             - containerPort: 8080
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
-        

@@ -139,7 +139,7 @@ func loadEnvironmentVariables() {
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
 	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
-	whitelistPORT = getEnv("WHITELIST_PORT", "8080")
+	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
 
 	// setting namespaces allowed for attestation: only pods deployed within them can be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)

@@ -22,13 +22,12 @@ import (
 )
 
 var (
-	red                  *color.Color
-	green                *color.Color
-	yellow               *color.Color
-	blue                 *color.Color
-	dynamicClient        dynamic.Interface
-	clientset            *kubernetes.Clientset
-	attestationNamespace string
+	red           *color.Color
+	green         *color.Color
+	yellow        *color.Color
+	blue          *color.Color
+	dynamicClient dynamic.Interface
+	clientset     *kubernetes.Clientset
 )
 
 func initializeColors() {
@@ -40,16 +39,12 @@ func initializeColors() {
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
 func loadEnvironmentVariables() {
-	attestationNamespace = getEnv("attestation_namespace", "default")
 }
 
 // getEnv retrieves the value of an environment variable or returns a default value if not set.
 func getEnv(key, defaultValue string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		if key == "ATTESTATION_NAMESPACE" {
-			fmt.Printf(yellow.Sprintf("[%s] '%s' environment variable missing: setting default value\n", time.Now().Format("02-01-2006 15:04:05"), key))
-		}
 		return defaultValue
 	}
 	return value
@@ -247,7 +242,6 @@ func checkAgentStatus(obj interface{}) {
 
 func main() {
 	initializeColors()
-	loadEnvironmentVariables()
 	configureKubernetesClient()
 
 	stopCh := setupSignalHandler()

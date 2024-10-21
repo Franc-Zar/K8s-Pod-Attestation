@@ -18,7 +18,7 @@ spec:
           image: franczar/k8s-attestation-pod-handler:latest
           env:
             - name: REGISTRAR_HOST
-              value: "localhost"
+              value: "192.168.0.103"
             - name: REGISTRAR_PORT
               value: "30000"
             - name: POD_HANDLER_PORT
