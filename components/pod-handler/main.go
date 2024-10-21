@@ -168,18 +168,27 @@ func verifyTenantSignature(tenantName, message, signature string) (bool, error) 
 
 func getAttestationInformation(podName string) (string, string, string, error) {
 	// Retrieve the Pod from the Kubernetes API
-	pod, err := clientset.CoreV1().Pods("").Get(context.TODO(), podName, metav1.GetOptions{})
+	podList, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to retrieve Pod: %v", err.Error())
+		return "", "", "", fmt.Errorf("failed to retrieve Pods: %v", err.Error())
+	}
+
+	var podToAttest v1.Pod
+	// Iterate over the list of Pods and find the one matching the podName
+	for _, pod := range podList.Items {
+		if pod.Name == podName {
+			podToAttest = pod
+			break
+		}
 	}
 
 	// Check if the pod is in a Running state
-	if pod.Status.Phase != v1.PodRunning {
+	if podToAttest.Status.Phase != v1.PodRunning {
 		return "", "", "", fmt.Errorf("Pod: %s is not running", podName)
 	}
 
-	podUID := pod.GetUID()
-	nodeName := pod.Spec.NodeName
+	podUID := podToAttest.GetUID()
+	nodeName := podToAttest.Spec.NodeName
 
 	// Retrieve the Node information using the nodeName
 	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})

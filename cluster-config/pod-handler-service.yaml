@@ -13,6 +13,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create"]  # permission for pods
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["example.com"]  # Change this to your specific CRD group
     resources: ["agents"]  # Add your CRD resources here
     verbs: ["get", "list", "watch"]
