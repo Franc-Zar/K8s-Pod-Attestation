@@ -1209,7 +1209,7 @@ func deleteAgentCRDInstance(nodeName string) error {
 		return fmt.Errorf("Error deleting Agent CRD instance: %v\n", err)
 
 	}
-	fmt.Printf(yellow.Sprintf("Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentCRDName))
+	fmt.Printf(yellow.Sprintf("[%s] Agent CRD instance deleted: %s\n", time.Now().Format("02-01-2006 15:04:05"), agentCRDName))
 	return nil
 }
 
