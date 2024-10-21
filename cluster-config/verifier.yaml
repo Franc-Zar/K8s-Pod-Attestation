@@ -23,3 +23,5 @@ spec:
         - name: kube-config
           hostPath:
             path: /home/node/.kube
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"

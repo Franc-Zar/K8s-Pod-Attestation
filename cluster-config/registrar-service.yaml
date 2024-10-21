@@ -21,6 +21,8 @@ spec:
               value: "8080"
           ports:
             - containerPort: 8080
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
 ---
 apiVersion: v1
 kind: Service
