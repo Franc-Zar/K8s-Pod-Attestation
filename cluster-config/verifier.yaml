@@ -58,6 +58,15 @@ spec:
       containers:
         - name: verifier
           image: franczar/k8s-attestation-verifier:latest
+          env:
+            - name: REGISTRAR_HOST
+              value: "192.168.0.103"
+            - name: REGISTRAR_PORT
+              value: "30000"
+            - name: WHITELIST_HOST
+              value: "192.168.0.103"
+            - name: WHITELIST_PORT
+              value: "30002" 
           volumeMounts:
             - name: kube-config
               mountPath: /root/.kube
