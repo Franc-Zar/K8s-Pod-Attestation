@@ -359,7 +359,7 @@ func getAgentPort(agentName string) (string, error) {
 	// Iterate through the service ports to find a NodePort
 	for _, port := range service.Spec.Ports {
 		if port.NodePort != 0 {
-			return string(port.NodePort), nil
+			return fmt.Sprintf("%d", port.NodePort), nil
 		}
 	}
 
