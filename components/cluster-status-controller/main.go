@@ -127,16 +127,25 @@ func formatAgentCRD(obj interface{}) map[string]interface{} {
 }
 
 func deletePod(podName string) error {
-	err := dynamicClient.Resource(schema.GroupVersionResource{
-		Group:    "",
-		Version:  "v1",
-		Resource: "pods",
-	}).Namespace("").Delete(context.Background(), podName, metav1.DeleteOptions{})
+	// Get all pods
+	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("metadata.name=%s", podName),
+	})
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error deleting pod %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
+		fmt.Printf(red.Sprintf("[%s] Error while searching for Pod: %s: %v", time.Now().Format("02-01-2006 15:04:05"), podName, err))
 		return err
 	}
-	fmt.Printf(yellow.Sprintf("[%s] Pod %s deleted successfully\n", time.Now().Format("02-01-2006 15:04:05"), podName))
+
+	// Delete each pod on the node
+	for _, pod := range pods.Items {
+		err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+		if err != nil {
+			fmt.Printf(red.Sprintf("[%s] Error deleting Pod %s in namespace %s: %v", time.Now().Format("02-01-2006 15:04:05"), pod.Name, pod.Namespace, err))
+			return err
+		}
+	}
+
+	fmt.Printf(yellow.Sprintf("[%s] Deleted untrusted Pod %s from trusted node\n", time.Now().Format("02-01-2006 15:04:05"), podName))
 	return nil
 }
 

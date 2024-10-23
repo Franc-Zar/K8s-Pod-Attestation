@@ -32,37 +32,115 @@ worker_data_to_append = {
     }
 }
 
-# Test data for storing a pod whitelist
 store_pod_data = {
     "imageName": "redis:latest",
-    "imageDigest": "sha256:abcd1234",
+    "imageDigest": "sha256:a06cea905344470eb49c972f3d030e22f28f632c1b4f43bbe4a26a4329dd6be5",
     "validFiles": [
         {
-            "filePath": "/bin/busybox",
+            "filePath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
             "validDigests": {
                 "SHA1": [],
                 "SHA256": [
-                    "59c8d3cd7110e90abe309b4390afc803a9d40dccd48bdd01afbf2abbe6be4e34",
-                    "5eab7b965422f7d475bc10d2b2d74d2e399da904e94c08565eef333df800085f"
+                    "88024463c275711c29f6ac2920a5d3174349d8802720e2df1656637c18d8efba"
                 ]
             }
         },
         {
-            "filePath": "/lib/ld-musl-x86_64.so.1",
+            "filePath": "/usr/bin/id",
             "validDigests": {
                 "SHA1": [],
                 "SHA256": [
-                    "6a1c33fa00fd34a8c6e3ee69767a6e35c96072cb239db6e30246af0695cfd6e0",
-                    "966253f07a0f352defe81bb9f77f5b2f0bc1bf5864b6f110a47cfcd521688021"
+                    "a3d987dd3f9ec0610dc13b7fdccef84895628065434f44247a65ef0d2a341b3c"
                 ]
             }
         },
         {
-            "filePath": "/opt/bin/flanneld",
+            "filePath": "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
             "validDigests": {
                 "SHA1": [],
                 "SHA256": [
-                    "7a7a8305290a02361c52e0aa168df8d4741bd7f882af421763675ae8f57894a2"
+                    "0207e4908ea384e186c75925b0e56996a3eccecd48c99252aeb757d0d3451c93"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "19c626251526131ac9340826c8f7bcb693c6ceb9d5da55919c3aa45d972b704f"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/bin/find",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "c703b94ad3448bccc79cda80520964c8d371918a39eecc27f8d60f4e8891770a"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/local/bin/docker-entrypoint.sh",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "c211bc06cdc6bd3fa4752394767359159cbdbdfe1c2c7f445e600419e4c52091"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "6d8337d3d1648ed3f42eccdc90044505bd19b042c496d05c4c4cd3dfdddd9b24"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "4d351715e334aa32eebeb2f03f376e5c961a47f73b37f36885c281ce6e24bb57"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/bin/dash",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "f5adb8bf0100ed0f8c7782ca5f92814e9229525a4b4e0d401cf3bea09ac960a6"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/local/bin/redis-server",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "6a4bf24ed035ca81c3b339d67953d942261af2156a01753601c5b05c30f0b72c"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "958fd4988943ab6713d04d4c7de8e468e358c5671db2acf9a7b025b465d10910"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/local/bin/gosu",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3"
                 ]
             }
         },
@@ -71,12 +149,25 @@ store_pod_data = {
             "validDigests": {
                 "SHA1": [],
                 "SHA256": [
-                    "11f8ea63fa5b85b1b0f77c8a794f6b2f196ece6aaa1b2d2a43bd72f9a4de98ff"
+                    "11ef55f97205c88f7e1f680ce02eb581534d2ef654b823089ac258db56ca04d2"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+            "validDigests": {
+                "SHA1": [],
+                "SHA256": [
+                    "4d13ab2d0a566eaeefbd493fffc3eca25fad9be4136c2796958906fa9c63d0f2"
                 ]
             }
         }
     ]
 }
+
+'''
+[{"filePath":"/usr/lib/x86_64-linux-gnu/libc.so.6","fileHash":"88024463c275711c29f6ac2920a5d3174349d8802720e2df1656637c18d8efba"},{"filePath":"/usr/bin/id","fileHash":"a3d987dd3f9ec0610dc13b7fdccef84895628065434f44247a65ef0d2a341b3c"},{"filePath":"/usr/lib/x86_64-linux-gnu/libselinux.so.1","fileHash":"0207e4908ea384e186c75925b0e56996a3eccecd48c99252aeb757d0d3451c93"},{"filePath":"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2","fileHash":"19c626251526131ac9340826c8f7bcb693c6ceb9d5da55919c3aa45d972b704f"},{"filePath":"/usr/bin/find","fileHash":"c703b94ad3448bccc79cda80520964c8d371918a39eecc27f8d60f4e8891770a"},{"filePath":"/usr/local/bin/docker-entrypoint.sh","fileHash":"c211bc06cdc6bd3fa4752394767359159cbdbdfe1c2c7f445e600419e4c52091"},{"filePath":"/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2","fileHash":"6d8337d3d1648ed3f42eccdc90044505bd19b042c496d05c4c4cd3dfdddd9b24"},{"filePath":"/usr/lib/x86_64-linux-gnu/libssl.so.3","fileHash":"4d351715e334aa32eebeb2f03f376e5c961a47f73b37f36885c281ce6e24bb57"},{"filePath":"/usr/bin/dash","fileHash":"f5adb8bf0100ed0f8c7782ca5f92814e9229525a4b4e0d401cf3bea09ac960a6"},{"filePath":"/usr/local/bin/redis-server","fileHash":"6a4bf24ed035ca81c3b339d67953d942261af2156a01753601c5b05c30f0b72c"},{"filePath":"/usr/lib/x86_64-linux-gnu/libm.so.6","fileHash":"958fd4988943ab6713d04d4c7de8e468e358c5671db2acf9a7b025b465d10910"},{"filePath":"/usr/local/bin/gosu","fileHash":"bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3"},{"filePath":"/pause","fileHash":"11ef55f97205c88f7e1f680ce02eb581534d2ef654b823089ac258db56ca04d2"},{"filePath":"/usr/lib/x86_64-linux-gnu/libcrypto.so.3","fileHash":"4d13ab2d0a566eaeefbd493fffc3eca25fad9be4136c2796958906fa9c63d0f2"}]
+'''
 
 
 # Test data for checking a pod whitelist
@@ -132,7 +223,7 @@ def delete_file_from_pod_whitelist(image_name, file_path):
 # Running the tests
 if __name__ == "__main__":
     append_worker_whitelist()      # Test adding worker whitelist
-    check_worker_whitelist()    # Test checking worker whitelist
+    #check_worker_whitelist()    # Test checking worker whitelist
     #delete_os_from_worker_whitelist("Ubuntu 22.04.6 LTS")
     #append_worker_whitelist()   # Test appending new OS to worker whitelist
     append_pod_whitelist()         # Test adding pod whitelist

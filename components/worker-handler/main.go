@@ -274,6 +274,10 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 							},
 						},
 					},
+					// Ensure pod is deployed on the new worker node
+					NodeSelector: map[string]string{
+						"kubernetes.io/hostname": newWorker.GetName(),
+					},
 				},
 			},
 		},

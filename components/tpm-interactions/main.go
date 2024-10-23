@@ -9,12 +9,14 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	x509ext "github.com/google/go-attestation/x509"
 	"github.com/google/go-tpm-tools/client"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -126,7 +128,7 @@ func main() {
 	log.Printf(encodePublicKeyToPEM(retrievedAK.PublicKey()))
 
 	//log.Printf("------ Signature Verification with AK --------")
-	//signature := signDataWithAK(akHandle, "hello world", rwc)
+	signature := signDataWithAK(akHandle, "hello world", rwc)
 	//verifySignature(retrievedAK.PublicKey().(*rsa.PublicKey), []byte("hello world"), signature)
 
 	log.Printf("------ Encrypting challenge using EK --------")
@@ -217,6 +219,31 @@ func VerifyCertificateChain(providedCertPEM, intermediateCertPEM, rootCertPEM st
 	return nil
 }
 
+func copyFileToTemp(srcFilePath string) (string, error) {
+	// Open the source file
+	srcFile, err := os.Open(srcFilePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open source file: %v", err)
+	}
+	defer srcFile.Close()
+
+	// Create a temporary file
+	tmpFile, err := ioutil.TempFile(os.TempDir(), "quotedIMA")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer tmpFile.Close()
+
+	// Copy the contents from the source file to the temp file
+	_, err = io.Copy(tmpFile, srcFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to copy file: %v", err)
+	}
+
+	// Return the name of the temporary file
+	return tmpFile.Name(), nil
+}
+
 // HandleTPMSubjectAltName processes the subjectAltName extension to mark it as handled
 func HandleTPMSubjectAltName(cert *x509.Certificate) (*x509ext.SubjectAltName, error) {
 	for _, ext := range cert.Extensions {
@@ -243,21 +270,24 @@ func HandleTPMSubjectAltName(cert *x509.Certificate) (*x509ext.SubjectAltName, e
 	return nil, fmt.Errorf("SAN extension not found")
 }
 
-// extractSHADigest extracts the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
-func extractSHADigest(input string) (string, error) {
-	// Define a regular expression to match the prefix "sha<number>:"
+// extractSHADigest extracts the algorithm (e.g., "sha256") and the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
+func extractSHADigest(input string) (string, string, error) {
+	// Define a regular expression to match the prefix "sha<number>:" followed by the hex digest
 	re := regexp.MustCompile(`^sha[0-9]+:`)
 
-	if re.MatchString(input) {
-		// Remove the matching prefix and return the remaining part (hex digest)
-		return re.ReplaceAllString(input, ""), nil
+	// Check if the input matches the expected format
+	if matches := re.FindStringSubmatch(input); matches != nil {
+		fileHashElements := strings.Split(input, ":")
+
+		return fileHashElements[0], fileHashElements[1], nil
 	}
-	return "", fmt.Errorf("input does not have a valid sha<algo>: prefix")
+
+	return "", "", fmt.Errorf("input does not have a valid sha<algo>:<hex_digest> format")
 }
 
-func verifyIMAhash(pcr10 string) {
+func verifyIMAHash(pcr10 string, tmpIMA string) {
 	// Open the file
-	IMAMeasurementLog, err := os.Open("./ascii_runtime_measurements")
+	IMAMeasurementLog, err := os.Open(tmpIMA)
 	if err != nil {
 		log.Fatalf("failed to open IMA measurement log: %v", err)
 	}
@@ -271,54 +301,66 @@ func verifyIMAhash(pcr10 string) {
 
 	// Convert the decoded log to a string and split it into lines
 	logLines := strings.Split(string(fileContent), "\n")
+	if len(logLines) > 0 && logLines[len(logLines)-1] == "" {
+		logLines = logLines[:len(logLines)-1] // Remove the last empty line --> each entry adds a \n so last line will add an empty line
+	}
 
-	previousHash := make([]byte, 20)
+	previousHash := make([]byte, 32)
 	// Iterate through each line and extract relevant fields
 	for idx, IMALine := range logLines {
 		// Split the line by whitespace
 		IMAFields := strings.Fields(IMALine)
 
 		templateHashField := IMAFields[1]
+		depField := IMAFields[3]
+		cgroupField := IMAFields[4]
+		fileHashField := IMAFields[5]
+		filePathField := IMAFields[6]
+
+		hashAlgo, fileHash, err := extractSHADigest(fileHashField)
+		if err != nil {
+			log.Fatalf("error")
+		}
+
+		extendValue := validateIMAEntry(templateHashField, depField, cgroupField, hashAlgo, fileHash, filePathField)
 
 		// Use the helper function to extend the PCR with the current template hash
-		newHash, err := extendIMAEntries(previousHash, templateHashField)
+		extendedHash, err := extendIMAEntries(previousHash, extendValue)
 		if err != nil {
 			fmt.Printf("Error computing hash at index %d: %v\n", idx, err)
 			continue
 		}
 
 		// Update the previous hash for the next iteration
-		previousHash = newHash
+		previousHash = extendedHash
+		if hex.EncodeToString(extendedHash) == pcr10 {
+			log.Printf("IMA Verification successful: %s = %s", hex.EncodeToString(extendedHash), pcr10)
+			return
+		}
 	}
-
-	// Convert the final hash to a hex string for comparison
-	cumulativeHashIMAHex := hex.EncodeToString(previousHash)
-	if cumulativeHashIMAHex != pcr10 {
-		log.Fatalf("IMA Verification failed: computed hash %s", cumulativeHashIMAHex)
-	}
-	log.Printf("IMA Verification successful: %s = %s", cumulativeHashIMAHex, pcr10)
+	log.Fatalf("IMA Verification failed: %s != %s", hex.EncodeToString(previousHash), pcr10)
 }
 
 // Helper function to compute the new hash by concatenating previous hash and template hash
 func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) {
-	// Create a new SHA-1 hash
-	hash := sha1.New()
+	// Create a new SHA-256 hash
+	hash := sha256.New()
 
 	// Decode the template hash from hexadecimal
 	templateHashBytes, err := hex.DecodeString(templateHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode template hash: %v", err)
 	}
-
 	// Concatenate previous hash and the new template hash
 	dataToHash := append(previousHash, templateHashBytes...)
-
 	// Compute the new hash
 	hash.Write(dataToHash)
-	return hash.Sum(nil), nil
+	result := hash.Sum(nil)
+	log.Printf(hex.EncodeToString(result))
+	return result, nil
 }
 
-func IMAAnalysys(podUID string) {
+func IMAAnalysis(podUID string) {
 	// Open the file
 	IMAMeasurementLog, err := os.Open("./ascii_runtime_measurements_sha256")
 	if err != nil {
@@ -356,7 +398,7 @@ func IMAAnalysys(podUID string) {
 		// Check if the cgroup path contains the podUID
 		if checkPodUIDMatch(cgroupPathField, podUID) {
 			// Extract the file hash and file path (sixth and seventh elements)
-			fileHash, err := extractSHADigest(IMAFields[5])
+			_, fileHash, err := extractSHADigest(IMAFields[5])
 			if err != nil {
 				log.Fatalf("failed to decode file hash field: %v", err)
 			}
@@ -457,21 +499,186 @@ func checkPodUIDMatch(path, podUID string) bool {
 	return r.MatchString(path)
 }
 
+// Function to pack IMA path (similar to pack_ima_path in Python)
+func packIMAPath(path []byte) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Pack length (4 bytes)
+	length := uint32(len(path) + 1) // length + 1 for NULL_BYTE
+	if err := binary.Write(buf, binary.LittleEndian, length); err != nil {
+		return nil, fmt.Errorf("failed to pack length: %v", err)
+	}
+
+	// Pack path (len(path) bytes)
+	if _, err := buf.Write(path); err != nil {
+		return nil, fmt.Errorf("failed to pack path: %v", err)
+	}
+
+	// Pack NULL_BYTE (1 byte)
+	if err := binary.Write(buf, binary.LittleEndian, NULL_BYTE); err != nil {
+		return nil, fmt.Errorf("failed to pack NULL_BYTE: %v", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// Constants
+const COLON_BYTE = byte(58) // ASCII code for ":"
+const NULL_BYTE = byte(0)
+
+// Function to pack IMA hash
+func packIMAHash(hashAlg string, fileHash []byte) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Pack total length (algorithm + 2 extra bytes + hash length)
+	totalLen := uint32(len(hashAlg) + 2 + len(fileHash))
+	if err := binary.Write(buf, binary.LittleEndian, totalLen); err != nil {
+		return nil, fmt.Errorf("failed to pack total length: %v", err)
+	}
+
+	// Pack algorithm
+	if _, err := buf.Write([]byte(hashAlg)); err != nil {
+		return nil, fmt.Errorf("failed to pack algorithm: %v", err)
+	}
+
+	// Pack COLON_BYTE (1 byte)
+	if err := buf.WriteByte(COLON_BYTE); err != nil {
+		return nil, fmt.Errorf("failed to pack COLON_BYTE: %v", err)
+	}
+
+	// Pack NULL_BYTE (1 byte)
+	if err := buf.WriteByte(NULL_BYTE); err != nil {
+		return nil, fmt.Errorf("failed to pack NULL_BYTE: %v", err)
+	}
+
+	// Pack fileHash (len(fileHash) bytes)
+	if _, err := buf.Write(fileHash); err != nil {
+		return nil, fmt.Errorf("failed to pack fileHash: %v", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+func validateIMAEntry(IMATemplateHash, depField, cgroupField, hashAlg, fileHash, filePathField string) string {
+	packedDep, err := packIMAPath([]byte(depField))
+	if err != nil {
+		log.Fatalf("err")
+	}
+	packedCgroup, err := packIMAPath([]byte(cgroupField))
+	if err != nil {
+		log.Fatalf("err")
+	}
+	decodedFileHash, err := hex.DecodeString(fileHash)
+	if err != nil {
+		log.Fatalf("err")
+	}
+	packedFileHash, err := packIMAHash(hashAlg, decodedFileHash)
+	if err != nil {
+		log.Fatalf("err")
+	}
+	packedFilePath, err := packIMAPath([]byte(filePathField))
+	if err != nil {
+		log.Fatalf("err")
+	}
+
+	IMAEntrySha1, IMAEntrySha256, err := computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePath)
+	if err != nil {
+		log.Fatalf("err")
+	}
+
+	if IMAEntrySha1 != IMATemplateHash {
+		log.Fatalf("IMA Entry invalid")
+	}
+	return IMAEntrySha256
+}
+
+func computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePath []byte) (string, string, error) {
+	packedTemplateEntry := append(packedDep, packedCgroup...)
+	packedTemplateEntry = append(packedTemplateEntry, packedFileHash...)
+	packedTemplateEntry = append(packedTemplateEntry, packedFilePath...)
+	sha1Hash := sha1.Sum(packedTemplateEntry)
+	sha256Hash := sha256.Sum256(packedTemplateEntry)
+
+	return hex.EncodeToString(sha1Hash[:]), hex.EncodeToString(sha256Hash[:]), nil
+
+}
+
+func main() {
+	rwc, err := tpmutil.OpenTPM("/dev/tpm0") //simulator.GetWithFixedSeedInsecure(1073741825)
+	if err != nil {
+		log.Fatalf("can't open TPM: %v", err)
+	}
+	defer func() {
+		if err := rwc.Close(); err != nil {
+			log.Fatalf("\ncan't close TPM: %v", err)
+		}
+	}()
+
+	akHandle := generateAK(rwc)
+
+	validateQuote(rwc, akHandle)
+
+}
+
+/*
 func main() {
 	//IMAAnalysys("eee87997-2192-4e41-927c-65e71a312518")
-	//verifyIMAhash("61f0b0d5021a930151775140e900ea55f98110d0")
-	tpmCert := "-----BEGIN CERTIFICATE-----\nMIIElTCCA32gAwIBAgIEFMzNOTANBgkqhkiG9w0BAQsFADCBgzELMAkGA1UEBhMC\nREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEaMBgGA1UECwwR\nT1BUSUdBKFRNKSBUUE0yLjAxNTAzBgNVBAMMLEluZmluZW9uIE9QVElHQShUTSkg\nUlNBIE1hbnVmYWN0dXJpbmcgQ0EgMDAzMB4XDTE2MDEwMTEzMTAyMloXDTMxMDEw\nMTEzMTAyMlowADCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAISFY3i9\nWciX46z/ALiAKejoHbxDOTyldeUPYwNVxU9rOEuWl9EvB+cn//ecWPeVXjj1rqYP\nwZztCDPORjHa93JnW+z75brKmtekC1O8R9ii8oAyEHmwvvgxHd8oOLqHBfTvodn2\n1pE6gxbeZCETU6FcpqVMHJJQBpNocX7nOX/2QqJW10MkUN+b8EodEv7xJ5dFV7B6\nkG9UowP1hqgSngG4gOrm3wAfXREsU0ne9KYTSZwXWb6JErIM0OqY/1Uv4fNmd5BQ\nUJwXQK4WKfQlT5++d2oJHpYkF99CHM4l/JlSg1+apZ80cGfNA9nhuk/E89lrc7MM\nITuVMCij4Mu9XqMCAwEAAaOCAZEwggGNMFsGCCsGAQUFBwEBBE8wTTBLBggrBgEF\nBQcwAoY/aHR0cDovL3BraS5pbmZpbmVvbi5jb20vT3B0aWdhUnNhTWZyQ0EwMDMv\nT3B0aWdhUnNhTWZyQ0EwMDMuY3J0MA4GA1UdDwEB/wQEAwIAIDBRBgNVHREBAf8E\nRzBFpEMwQTEWMBQGBWeBBQIBDAtpZDo0OTQ2NTgwMDETMBEGBWeBBQICDAhTTEIg\nOTY2NTESMBAGBWeBBQIDDAdpZDowNTI4MAwGA1UdEwEB/wQCMAAwUAYDVR0fBEkw\nRzBFoEOgQYY/aHR0cDovL3BraS5pbmZpbmVvbi5jb20vT3B0aWdhUnNhTWZyQ0Ew\nMDMvT3B0aWdhUnNhTWZyQ0EwMDMuY3JsMBUGA1UdIAQOMAwwCgYIKoIUAEQBFAEw\nHwYDVR0jBBgwFoAUQLhoK40YRQorBoSdm1zZb0zd9L4wEAYDVR0lBAkwBwYFZ4EF\nCAEwIQYDVR0JBBowGDAWBgVngQUCEDENMAsMAzIuMAIBAAIBdDANBgkqhkiG9w0B\nAQsFAAOCAQEApynlEZGc4caT7bQJjhrvOtv4RFu3FNA9hgsF+2BGltsumqo9n3nU\nGoGt65A5mJAMCY1gGF1knvUFq8ey+UuIFw3QulHGENOiRu0aT3x9W7c6BxQIDFFC\nPtA+Qvvg+HJJ6XjihQRc3DU01HZm3xD//fGIDuYasZwBd2g/Ejedp2tKBl2M98FO\n48mbZ4WtaPrEALn3UQMf27pWqe2hUKFSKDEurijnchsdmRjTmUEWM1/9GFkh6IrT\nYvRBngNqOffJ+If+PI3x2GXkGnzsA6IxroEY9CwOhmNp+6xbAgqUedd5fWMLBN3Q\nMjHSp1Sl8wp00xRztfh0diBdicy3Hbn03g==\n-----END CERTIFICATE-----"
-	intermediateCert := "-----BEGIN CERTIFICATE-----\nMIIFszCCA5ugAwIBAgIEasM5FDANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJE\nRTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJP\nUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkg\nUlNBIFJvb3QgQ0EwHhcNMTQxMTI0MTUzNzE2WhcNMzQxMTI0MTUzNzE2WjCBgzEL\nMAkGA1UEBhMCREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEa\nMBgGA1UECwwRT1BUSUdBKFRNKSBUUE0yLjAxNTAzBgNVBAMMLEluZmluZW9uIE9Q\nVElHQShUTSkgUlNBIE1hbnVmYWN0dXJpbmcgQ0EgMDAzMIIBIjANBgkqhkiG9w0B\nAQEFAAOCAQ8AMIIBCgKCAQEAuUD5SLLVYRmuxDjT3cWQbRTywTWUVFE3EupJQZjJ\n9mvFc2KcjpQv6rpdaT4JC33P1M9iJgrHwYO0AZlGl2FcFpSNkc/3CWoMTT9rOdwS\n/MxlNSkxwTz6IAYUYh7+pd7T49NpRRGZ1dOMfyOxWgA4C0g3EP/ciIvA2cCZ95Hf\nARD9NhuG2DAEYGNRSHY2d/Oxu+7ytzkGFFj0h1jnvGNJpWNCf3CG8aNc5gJAduMr\nWcaMHb+6fWEysg++F2FLav813+/61FqvSrUMsQg0lpE16KBA5QC2Wcr/kLZGVVGc\nuALtgJ/bnd8XgEv7W8WG+jyblUe+hkZWmxYluHS3yJeRbwIDAQABo4IBODCCATQw\nVwYIKwYBBQUHAQEESzBJMEcGCCsGAQUFBzAChjtodHRwOi8vcGtpLmluZmluZW9u\nLmNvbS9PcHRpZ2FSc2FSb290Q0EvT3B0aWdhUnNhUm9vdENBLmNydDAdBgNVHQ4E\nFgQUQLhoK40YRQorBoSdm1zZb0zd9L4wDgYDVR0PAQH/BAQDAgAGMBIGA1UdEwEB\n/wQIMAYBAf8CAQAwTAYDVR0fBEUwQzBBoD+gPYY7aHR0cDovL3BraS5pbmZpbmVv\nbi5jb20vT3B0aWdhUnNhUm9vdENBL09wdGlnYVJzYVJvb3RDQS5jcmwwFQYDVR0g\nBA4wDDAKBggqghQARAEUATAfBgNVHSMEGDAWgBTcu1ar8Rj8ppp1ERBlhBKe1UGS\nuTAQBgNVHSUECTAHBgVngQUIATANBgkqhkiG9w0BAQsFAAOCAgEAeUzrsGq3oQOT\nmF7g71TtMMndwPxgZvaB4bAc7dNettn5Yc1usikERfvJu4/iBs/Tdl6z6TokO+6V\nJuBb6PDV7f5MFfffeThraPCTeDcyYBzQRGnoCxc8Kf81ZJT04ef8CQkkfuZHW1pO\n+HHM1ZfFfNdNTay1h83x1lg1U0KnlmJ5KCVFiB94owr9t5cUoiSbAsPcpqCrWczo\nRsg1aTpokwI8Y45lqgt0SxEmQw2PIAEjHG2GQcLBDeI0c7cK5OMEjSMXStJHmNbp\nu4RHXzd+47nCD2kGV8Bx5QnK8qDVAFAe/UTDQi5mTtDFRL36Nns7jz8USemu+bw9\nl24PN73rKcB2wNF2/oFTLPHkdYfTKYGXG1g2ZkDcTAENSOq3fcTfAuyHQozBwYHG\nGGyyPHy6KvLkqMQuqeDv0QxGOtE+6cedFMP2D9bMaujR389mSm7DE6YyNQClRW7w\nJ1+rNYuN2vErvB96ir1zljXq0yMxrm5nTeiAT4p5eoFqoeSYDbFljt/f+PebREiO\nnJIy4fdvKlHAf70gPdYpYipc4oTZxLeWjDQxRFFBDFrnLdlPSg6zSL2Q3ANAEI3y\nMtHaEaU0wbaBvezyzMUHI5nLnYFL+QRP4N2OFNI/ejBaEpmIXzf6+/eF40MNLHuR\n9/B93Q+hpw8O6XZ7qx697I+5+smLlPQ=\n-----END CERTIFICATE-----\n"
-	rootCert := "-----BEGIN CERTIFICATE-----\nMIIFqzCCA5OgAwIBAgIBAzANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJERTEh\nMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ\nR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkgUlNB\nIFJvb3QgQ0EwHhcNMTMwNzI2MDAwMDAwWhcNNDMwNzI1MjM1OTU5WjB3MQswCQYD\nVQQGEwJERTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYD\nVQQLDBJPUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElH\nQShUTSkgUlNBIFJvb3QgQ0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoIC\nAQC7E+gc0B5T7awzux66zMMZMTtCkPqGv6a3NVx73ICg2DSwnipFwBiUl9soEodn\n25SVVN7pqmvKA2gMTR5QexuYS9PPerfRZrBY00xyFx84V+mIRPg4YqUMLtZBcAwr\nR3GO6cffHp20SBH5ITpuqKciwb0v5ueLdtZHYRPq1+jgy58IFY/vACyF/ccWZxUS\nJRNSe4ruwBgI7NMWicxiiWQmz1fE3e0mUGQ1tu4M6MpZPxTZxWzN0mMz9noj1oIT\nZUnq/drN54LHzX45l+2b14f5FkvtcXxJ7OCkI7lmWIt8s5fE4HhixEgsR2RX5hzl\n8XiHiS7uD3pQhBYSBN5IBbVWREex1IUat5eAOb9AXjnZ7ivxJKiY/BkOmrNgN8k2\n7vOS4P81ix1GnXsjyHJ6mOtWRC9UHfvJcvM3U9tuU+3dRfib03NGxSPnKteL4SP1\nbdHfiGjV3LIxzFHOfdjM2cvFJ6jXg5hwXCFSdsQm5e2BfT3dWDBSfR4h3Prpkl6d\ncAyb3nNtMK3HR5yl6QBuJybw8afHT3KRbwvOHOCR0ZVJTszclEPcM3NQdwFlhqLS\nghIflaKSPv9yHTKeg2AB5q9JSG2nwSTrjDKRab225+zJ0yylH5NwxIBLaVHDyAEu\n81af+wnm99oqgvJuDKSQGyLf6sCeuy81wQYO46yNa+xJwQIDAQABo0IwQDAdBgNV\nHQ4EFgQU3LtWq/EY/KaadREQZYQSntVBkrkwDgYDVR0PAQH/BAQDAgAGMA8GA1Ud\nEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBAGHTBUx3ETIXYJsaAgb2pyyN\nUltVL2bKzGMVSsnTCrXUU8hKrDQh3jNIMrS0d6dU/fGaGJvehxmmJfjaN/IFWA4M\nBdZEnpAe2fJEP8vbLa/QHVfsAVuotLD6QWAqeaC2txpxkerveoV2JAwj1jrprT4y\nrkS8SxZuKS05rYdlG30GjOKTq81amQtGf2NlNiM0lBB/SKTt0Uv5TK0jIWbz2WoZ\ngGut7mF0md1rHRauWRcoHQdxWSQTCTtgoQzeBj4IS6N3QxQBKV9LL9UWm+CMIT7Y\nnp8bSJ8oW4UdpSuYWe1ZwSjZyzDiSzpuc4gTS6aHfMmEfoVwC8HN03/HD6B1Lwo2\nDvEaqAxkya9IYWrDqkMrEErJO6cqx/vfIcfY/8JYmUJGTmvVlaODJTwYwov/2rjr\nla5gR+xrTM7dq8bZimSQTO8h6cdL6u+3c8mGriCQkNZIZEac/Gdn+KwydaOZIcnf\nRdp3SalxsSp6cWwJGE4wpYKB2ClM2QF3yNQoTGNwMlpsxnU72ihDi/RxyaRTz9OR\npubNq8Wuq7jQUs5U00ryrMCZog1cxLzyfZwwCYh6O2CmbvMoydHNy5CU3ygxaLWv\nJpgZVHN103npVMR3mLNa3QE+5MFlBlP3Mmystu8iVAKJas39VO5y5jad4dRLkwtM\n6sJa8iBpdRjZrBp5sJBI\n-----END CERTIFICATE-----\n"
-	err := VerifyCertificateChain(tpmCert, intermediateCert, rootCert)
-	if err != nil {
-		log.Fatalf("Certificate is not valid: %v", err)
-	}
-	log.Printf("Valid certificate tpm")
+	//verifyIMAHash("61f0b0d5021a930151775140e900ea55f98110d0")
 
-	port := fmt.Sprintf("%d", int32(31000))
-	log.Printf(port)
+		tpmCert := "-----BEGIN CERTIFICATE-----\nMIIElTCCA32gAwIBAgIEFMzNOTANBgkqhkiG9w0BAQsFADCBgzELMAkGA1UEBhMC\nREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEaMBgGA1UECwwR\nT1BUSUdBKFRNKSBUUE0yLjAxNTAzBgNVBAMMLEluZmluZW9uIE9QVElHQShUTSkg\nUlNBIE1hbnVmYWN0dXJpbmcgQ0EgMDAzMB4XDTE2MDEwMTEzMTAyMloXDTMxMDEw\nMTEzMTAyMlowADCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAISFY3i9\nWciX46z/ALiAKejoHbxDOTyldeUPYwNVxU9rOEuWl9EvB+cn//ecWPeVXjj1rqYP\nwZztCDPORjHa93JnW+z75brKmtekC1O8R9ii8oAyEHmwvvgxHd8oOLqHBfTvodn2\n1pE6gxbeZCETU6FcpqVMHJJQBpNocX7nOX/2QqJW10MkUN+b8EodEv7xJ5dFV7B6\nkG9UowP1hqgSngG4gOrm3wAfXREsU0ne9KYTSZwXWb6JErIM0OqY/1Uv4fNmd5BQ\nUJwXQK4WKfQlT5++d2oJHpYkF99CHM4l/JlSg1+apZ80cGfNA9nhuk/E89lrc7MM\nITuVMCij4Mu9XqMCAwEAAaOCAZEwggGNMFsGCCsGAQUFBwEBBE8wTTBLBggrBgEF\nBQcwAoY/aHR0cDovL3BraS5pbmZpbmVvbi5jb20vT3B0aWdhUnNhTWZyQ0EwMDMv\nT3B0aWdhUnNhTWZyQ0EwMDMuY3J0MA4GA1UdDwEB/wQEAwIAIDBRBgNVHREBAf8E\nRzBFpEMwQTEWMBQGBWeBBQIBDAtpZDo0OTQ2NTgwMDETMBEGBWeBBQICDAhTTEIg\nOTY2NTESMBAGBWeBBQIDDAdpZDowNTI4MAwGA1UdEwEB/wQCMAAwUAYDVR0fBEkw\nRzBFoEOgQYY/aHR0cDovL3BraS5pbmZpbmVvbi5jb20vT3B0aWdhUnNhTWZyQ0Ew\nMDMvT3B0aWdhUnNhTWZyQ0EwMDMuY3JsMBUGA1UdIAQOMAwwCgYIKoIUAEQBFAEw\nHwYDVR0jBBgwFoAUQLhoK40YRQorBoSdm1zZb0zd9L4wEAYDVR0lBAkwBwYFZ4EF\nCAEwIQYDVR0JBBowGDAWBgVngQUCEDENMAsMAzIuMAIBAAIBdDANBgkqhkiG9w0B\nAQsFAAOCAQEApynlEZGc4caT7bQJjhrvOtv4RFu3FNA9hgsF+2BGltsumqo9n3nU\nGoGt65A5mJAMCY1gGF1knvUFq8ey+UuIFw3QulHGENOiRu0aT3x9W7c6BxQIDFFC\nPtA+Qvvg+HJJ6XjihQRc3DU01HZm3xD//fGIDuYasZwBd2g/Ejedp2tKBl2M98FO\n48mbZ4WtaPrEALn3UQMf27pWqe2hUKFSKDEurijnchsdmRjTmUEWM1/9GFkh6IrT\nYvRBngNqOffJ+If+PI3x2GXkGnzsA6IxroEY9CwOhmNp+6xbAgqUedd5fWMLBN3Q\nMjHSp1Sl8wp00xRztfh0diBdicy3Hbn03g==\n-----END CERTIFICATE-----"
+		intermediateCert := "-----BEGIN CERTIFICATE-----\nMIIFszCCA5ugAwIBAgIEasM5FDANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJE\nRTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJP\nUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkg\nUlNBIFJvb3QgQ0EwHhcNMTQxMTI0MTUzNzE2WhcNMzQxMTI0MTUzNzE2WjCBgzEL\nMAkGA1UEBhMCREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEa\nMBgGA1UECwwRT1BUSUdBKFRNKSBUUE0yLjAxNTAzBgNVBAMMLEluZmluZW9uIE9Q\nVElHQShUTSkgUlNBIE1hbnVmYWN0dXJpbmcgQ0EgMDAzMIIBIjANBgkqhkiG9w0B\nAQEFAAOCAQ8AMIIBCgKCAQEAuUD5SLLVYRmuxDjT3cWQbRTywTWUVFE3EupJQZjJ\n9mvFc2KcjpQv6rpdaT4JC33P1M9iJgrHwYO0AZlGl2FcFpSNkc/3CWoMTT9rOdwS\n/MxlNSkxwTz6IAYUYh7+pd7T49NpRRGZ1dOMfyOxWgA4C0g3EP/ciIvA2cCZ95Hf\nARD9NhuG2DAEYGNRSHY2d/Oxu+7ytzkGFFj0h1jnvGNJpWNCf3CG8aNc5gJAduMr\nWcaMHb+6fWEysg++F2FLav813+/61FqvSrUMsQg0lpE16KBA5QC2Wcr/kLZGVVGc\nuALtgJ/bnd8XgEv7W8WG+jyblUe+hkZWmxYluHS3yJeRbwIDAQABo4IBODCCATQw\nVwYIKwYBBQUHAQEESzBJMEcGCCsGAQUFBzAChjtodHRwOi8vcGtpLmluZmluZW9u\nLmNvbS9PcHRpZ2FSc2FSb290Q0EvT3B0aWdhUnNhUm9vdENBLmNydDAdBgNVHQ4E\nFgQUQLhoK40YRQorBoSdm1zZb0zd9L4wDgYDVR0PAQH/BAQDAgAGMBIGA1UdEwEB\n/wQIMAYBAf8CAQAwTAYDVR0fBEUwQzBBoD+gPYY7aHR0cDovL3BraS5pbmZpbmVv\nbi5jb20vT3B0aWdhUnNhUm9vdENBL09wdGlnYVJzYVJvb3RDQS5jcmwwFQYDVR0g\nBA4wDDAKBggqghQARAEUATAfBgNVHSMEGDAWgBTcu1ar8Rj8ppp1ERBlhBKe1UGS\nuTAQBgNVHSUECTAHBgVngQUIATANBgkqhkiG9w0BAQsFAAOCAgEAeUzrsGq3oQOT\nmF7g71TtMMndwPxgZvaB4bAc7dNettn5Yc1usikERfvJu4/iBs/Tdl6z6TokO+6V\nJuBb6PDV7f5MFfffeThraPCTeDcyYBzQRGnoCxc8Kf81ZJT04ef8CQkkfuZHW1pO\n+HHM1ZfFfNdNTay1h83x1lg1U0KnlmJ5KCVFiB94owr9t5cUoiSbAsPcpqCrWczo\nRsg1aTpokwI8Y45lqgt0SxEmQw2PIAEjHG2GQcLBDeI0c7cK5OMEjSMXStJHmNbp\nu4RHXzd+47nCD2kGV8Bx5QnK8qDVAFAe/UTDQi5mTtDFRL36Nns7jz8USemu+bw9\nl24PN73rKcB2wNF2/oFTLPHkdYfTKYGXG1g2ZkDcTAENSOq3fcTfAuyHQozBwYHG\nGGyyPHy6KvLkqMQuqeDv0QxGOtE+6cedFMP2D9bMaujR389mSm7DE6YyNQClRW7w\nJ1+rNYuN2vErvB96ir1zljXq0yMxrm5nTeiAT4p5eoFqoeSYDbFljt/f+PebREiO\nnJIy4fdvKlHAf70gPdYpYipc4oTZxLeWjDQxRFFBDFrnLdlPSg6zSL2Q3ANAEI3y\nMtHaEaU0wbaBvezyzMUHI5nLnYFL+QRP4N2OFNI/ejBaEpmIXzf6+/eF40MNLHuR\n9/B93Q+hpw8O6XZ7qx697I+5+smLlPQ=\n-----END CERTIFICATE-----\n"
+		rootCert := "-----BEGIN CERTIFICATE-----\nMIIFqzCCA5OgAwIBAgIBAzANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJERTEh\nMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ\nR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkgUlNB\nIFJvb3QgQ0EwHhcNMTMwNzI2MDAwMDAwWhcNNDMwNzI1MjM1OTU5WjB3MQswCQYD\nVQQGEwJERTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYD\nVQQLDBJPUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElH\nQShUTSkgUlNBIFJvb3QgQ0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoIC\nAQC7E+gc0B5T7awzux66zMMZMTtCkPqGv6a3NVx73ICg2DSwnipFwBiUl9soEodn\n25SVVN7pqmvKA2gMTR5QexuYS9PPerfRZrBY00xyFx84V+mIRPg4YqUMLtZBcAwr\nR3GO6cffHp20SBH5ITpuqKciwb0v5ueLdtZHYRPq1+jgy58IFY/vACyF/ccWZxUS\nJRNSe4ruwBgI7NMWicxiiWQmz1fE3e0mUGQ1tu4M6MpZPxTZxWzN0mMz9noj1oIT\nZUnq/drN54LHzX45l+2b14f5FkvtcXxJ7OCkI7lmWIt8s5fE4HhixEgsR2RX5hzl\n8XiHiS7uD3pQhBYSBN5IBbVWREex1IUat5eAOb9AXjnZ7ivxJKiY/BkOmrNgN8k2\n7vOS4P81ix1GnXsjyHJ6mOtWRC9UHfvJcvM3U9tuU+3dRfib03NGxSPnKteL4SP1\nbdHfiGjV3LIxzFHOfdjM2cvFJ6jXg5hwXCFSdsQm5e2BfT3dWDBSfR4h3Prpkl6d\ncAyb3nNtMK3HR5yl6QBuJybw8afHT3KRbwvOHOCR0ZVJTszclEPcM3NQdwFlhqLS\nghIflaKSPv9yHTKeg2AB5q9JSG2nwSTrjDKRab225+zJ0yylH5NwxIBLaVHDyAEu\n81af+wnm99oqgvJuDKSQGyLf6sCeuy81wQYO46yNa+xJwQIDAQABo0IwQDAdBgNV\nHQ4EFgQU3LtWq/EY/KaadREQZYQSntVBkrkwDgYDVR0PAQH/BAQDAgAGMA8GA1Ud\nEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBAGHTBUx3ETIXYJsaAgb2pyyN\nUltVL2bKzGMVSsnTCrXUU8hKrDQh3jNIMrS0d6dU/fGaGJvehxmmJfjaN/IFWA4M\nBdZEnpAe2fJEP8vbLa/QHVfsAVuotLD6QWAqeaC2txpxkerveoV2JAwj1jrprT4y\nrkS8SxZuKS05rYdlG30GjOKTq81amQtGf2NlNiM0lBB/SKTt0Uv5TK0jIWbz2WoZ\ngGut7mF0md1rHRauWRcoHQdxWSQTCTtgoQzeBj4IS6N3QxQBKV9LL9UWm+CMIT7Y\nnp8bSJ8oW4UdpSuYWe1ZwSjZyzDiSzpuc4gTS6aHfMmEfoVwC8HN03/HD6B1Lwo2\nDvEaqAxkya9IYWrDqkMrEErJO6cqx/vfIcfY/8JYmUJGTmvVlaODJTwYwov/2rjr\nla5gR+xrTM7dq8bZimSQTO8h6cdL6u+3c8mGriCQkNZIZEac/Gdn+KwydaOZIcnf\nRdp3SalxsSp6cWwJGE4wpYKB2ClM2QF3yNQoTGNwMlpsxnU72ihDi/RxyaRTz9OR\npubNq8Wuq7jQUs5U00ryrMCZog1cxLzyfZwwCYh6O2CmbvMoydHNy5CU3ygxaLWv\nJpgZVHN103npVMR3mLNa3QE+5MFlBlP3Mmystu8iVAKJas39VO5y5jad4dRLkwtM\n6sJa8iBpdRjZrBp5sJBI\n-----END CERTIFICATE-----\n"
+		err := VerifyCertificateChain(tpmCert, intermediateCert, rootCert)
+		if err != nil {
+			log.Fatalf("Certificate is not valid: %v", err)
+		}
+		log.Printf("Valid certificate tpm")
+
+		rwc, err := tpmutil.OpenTPM("/dev/tpm0") //simulator.GetWithFixedSeedInsecure(1073741825)
+		if err != nil {
+			log.Fatalf("can't open TPM: %v", err)
+		}
+		defer func() {
+			if err := rwc.Close(); err != nil {
+				log.Fatalf("\ncan't close TPM: %v", err)
+			}
+		}()
+
+		akHandle := generateAK(rwc)
+
+		pcrValue, err := tpm2legacy.ReadPCR(rwc, 10, tpm2legacy.AlgSHA256)
+		if err != nil {
+			log.Fatalf("failed to read PCR: %v", err)
+		}
+		log.Printf("PCR 10 VALUE: %x", pcrValue)
+		validateQuote(rwc, akHandle)
+
+
+	// Inputs
+	dep := "/home/nuc/.goland/jbr/lib/jspawnhelper:/home/nuc/.goland/bin/goland:/usr/bin/plasmashell:/usr/lib/systemd/systemd:/usr/lib/systemd/systemd:swapper/0"
+	cgroup := "/user.slice/user-1000.slice/user@1000.service/app.slice"
+	alg := "sha256"
+	hash, _ := hex.DecodeString("da4ef819e3035ee115f29c5103a74a94eba38cca4ca578329aeb5635b2f6264b")
+	file := "/usr/local/go/bin/gofmt"
+	desiredSha1 := "4b7a3cf367357ef25ee648a92c9431637bfa42c9"
+
+	// Pack the paths and the hash
+	packedDep, _ := packIMAPath([]byte(dep))
+	packedCgroup, _ := packIMAPath([]byte(cgroup))
+	packedFileHash, _ := packIMAHash(alg, hash)
+	packedFilePath, _ := packIMAPath([]byte(file))
+
+	// Concatenate all packed data
+	packedTemplateEntry := append(append(append(packedDep, packedCgroup...), packedFileHash...), packedFilePath...)
+
+	// Compute SHA-1 hash
+	sha1Hash := sha1.Sum(packedTemplateEntry)
+
+	// Print the result as hex
+	fmt.Printf("SHA-1 Hash: %x\n", sha1Hash)
+	fmt.Printf("desired SHA-1 Hash: %s\n", desiredSha1)
 }
+*/
 
 // Custom function that checks if PCRstoQuote contains any element from bootReservedPCRs
 // and returns the boolean and the list of matching PCRs
@@ -491,19 +698,9 @@ func containsAndReturnPCR(PCRstoQuote []int, bootReservedPCRs []int) (bool, []in
 func validateQuote(rwc io.ReadWriter, akHandle tpmutil.Handle) {
 	nonce := []byte("noncenon")
 
-	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7}
-	PCRstoQuote := []int{0, 1, 25}
-
-	// Custom function to return both found status and the PCR value
-	PCRsContainsBootReserved, foundPCR := containsAndReturnPCR(PCRstoQuote, bootReservedPCRs)
-
-	if PCRsContainsBootReserved {
-		log.Fatalf("Cannot perform quote on provided PCR set %v: boot reserved PCRs where included %v", foundPCR, bootReservedPCRs)
-	}
-
 	selectedPCRs := tpm2legacy.PCRSelection{
 		Hash: tpm2legacy.AlgSHA256,
-		PCRs: []int{0, 1, 2, 3, 4, 5, 6, 7},
+		PCRs: []int{10},
 	}
 
 	AK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), akHandle)
@@ -515,12 +712,18 @@ func validateQuote(rwc io.ReadWriter, akHandle tpmutil.Handle) {
 	if err != nil {
 		log.Fatalf("failed to create quote: %v", err)
 	}
+
 	quoteJSON, err := json.Marshal(quote)
 	if err != nil {
 		log.Fatalf("Failed to parse attestation result as json")
 	}
 
 	// Parse input JSON
+	tmpFileName, err := copyFileToTemp("/sys/kernel/security/integrity/ima/ascii_runtime_measurements")
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+
 	var input InputQuote
 	err = json.Unmarshal(quoteJSON, &input)
 	if err != nil {
@@ -580,9 +783,7 @@ func validateQuote(rwc io.ReadWriter, akHandle tpmutil.Handle) {
 		log.Fatalf(err.Error())
 	}
 
-	log.Printf(hex.EncodeToString(attestedQuoteInfo.PCRDigest))
-	log.Printf(quotePCRs.Hash.String())
-
+	verifyIMAHash(hex.EncodeToString(quotePCRs.GetPcrs()[10]), tmpFileName)
 	log.Printf("Quote valid")
 }
 

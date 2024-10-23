@@ -221,7 +221,6 @@ func encodePublicKeyToPEM(pubKey crypto.PublicKey) string {
 func getWorkerIdentifyingData(c *gin.Context) {
 	workerId = uuid.New().String()
 
-	// TODO send ek certificate to be validated _
 	workerEK, EKCert, err := getWorkerEKandCertificate()
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"message": err.Error(), "status": "error"})
@@ -286,7 +285,7 @@ func verifySignature(publicKeyPEM string, message string, signature string) erro
 }
 
 // Utility function: Sign a message using the provided private key
-func signWithAIK(message string) (string, error) {
+func signWithAIK(message []byte) (string, error) {
 	if AIKHandle.HandleValue() == 0 {
 		return "", fmt.Errorf("AIK is not already created")
 	}
@@ -298,9 +297,9 @@ func signWithAIK(message string) (string, error) {
 
 	defer AIK.Close()
 
-	AIKSignedData, err := AIK.SignData([]byte(message))
+	AIKSignedData, err := AIK.SignData(message)
 	if err != nil {
-		return "", fmt.Errorf("Failed to sign with AIK")
+		return "", fmt.Errorf("Failed to sign with AIK: %v", err)
 	}
 	return base64.StdEncoding.EncodeToString(AIKSignedData), nil
 }
@@ -421,7 +420,7 @@ func podAttestation(c *gin.Context) {
 	}
 
 	PCRsToQuote := []int{10}
-	workerQuoteJSON, err := quoteGeneralPurposePCRs(nonceBytes, PCRsToQuote)
+	workerQuote, err := quoteGeneralPurposePCRs(nonceBytes, PCRsToQuote)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"message": err.Error(),
@@ -444,23 +443,23 @@ func podAttestation(c *gin.Context) {
 		PodName:     attestationRequest.PodName,
 		PodUID:      attestationRequest.PodUID,
 		TenantId:    attestationRequest.TenantId,
-		WorkerQuote: workerQuoteJSON,
+		WorkerQuote: workerQuote,
 		WorkerIMA:   workerIMA,
 	}
 
-	evidenceJSON, err := json.Marshal(evidence)
+	evidenceDigest, err := computeEvidenceDigest(evidence)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Failed to serialize Evidence",
+			"message": "Failed to compute Evidence digest: " + err.Error(),
 			"status":  "error",
 		})
 		return
 	}
 
-	signedEvidence, err := signWithAIK(string(evidenceJSON))
+	signedEvidence, err := signWithAIK(evidenceDigest)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Failed to sign Evidence",
+			"message": "Failed to sign Evidence: " + err.Error(),
 			"status":  "error",
 		})
 		return
@@ -477,6 +476,26 @@ func podAttestation(c *gin.Context) {
 		"status":              "success",
 	})
 	return
+}
+
+// Function to compute the SHA256 digest of the Evidence structure
+func computeEvidenceDigest(evidence Evidence) ([]byte, error) {
+	// Serialize Evidence struct to JSON
+	evidenceJSON, err := json.Marshal(evidence)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize evidence: %v", err)
+	}
+
+	// Compute SHA256 hash
+	hash := sha256.New()
+	_, err = hash.Write(evidenceJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute hash: %v", err)
+	}
+
+	// Get the final hash as a hex-encoded string
+	digest := hash.Sum(nil)
+	return digest, nil
 }
 
 func getWorkerIMAMeasurementLog() (string, error) {
@@ -515,7 +534,7 @@ func containsAndReturnPCR(PCRstoQuote []int, bootReservedPCRs []int) (bool, []in
 }
 
 func quoteGeneralPurposePCRs(nonce []byte, PCRsToQuote []int) (string, error) {
-	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7}
+	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	// Custom function to return both found status and the PCR value
 	PCRsContainsBootReserved, foundPCR := containsAndReturnPCR(PCRsToQuote, bootReservedPCRs)
 	if PCRsContainsBootReserved {
@@ -558,7 +577,7 @@ func quoteBootAggregate(nonce []byte) (string, error) {
 
 	quote, err := AIK.Quote(bootPCRs, nonce)
 	if err != nil {
-		return "", fmt.Errorf("failed to create quote over PCRs 0-7: %v", err)
+		return "", fmt.Errorf("failed to create quote over PCRs 0-9: %v", err)
 	}
 	quoteJSON, err := json.Marshal(quote)
 	if err != nil {

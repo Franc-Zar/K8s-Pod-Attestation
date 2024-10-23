@@ -7,10 +7,12 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -99,6 +101,9 @@ type AttestationResult struct {
 	Result     string
 	Reason     string
 }
+
+const COLON_BYTE = byte(58) // ASCII code for ":"
+const NULL_BYTE = byte(0)
 
 // Color variables for output
 var (
@@ -331,6 +336,26 @@ func signMessage(privateKeyPEM string, message []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(signature), nil
 }
 
+// Function to compute the SHA256 digest of the Evidence structure
+func computeEvidenceDigest(evidence Evidence) ([]byte, error) {
+	// Serialize Evidence struct to JSON
+	evidenceJSON, err := json.Marshal(evidence)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize evidence: %v", err)
+	}
+
+	// Compute SHA256 hash
+	hash := sha256.New()
+	_, err = hash.Write(evidenceJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute hash: %v", err)
+	}
+
+	// Get the final hash as a hex-encoded string
+	digest := hash.Sum(nil)
+	return digest, nil
+}
+
 func extractNodeName(agentName string) (string, error) {
 	// Define the prefix that precedes the nodeName
 	prefix := "agent-"
@@ -464,14 +489,14 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		return nil, fmt.Errorf("Error while verifying Attestation Evidence: invalid Worker name")
 	}
 
-	evidenceJSON, err := json.Marshal(attestationResponse.Evidence)
+	evidenceDigest, err := computeEvidenceDigest(attestationResponse.Evidence)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error serializing Evidence\n", time.Now().Format("02-01-2006 15:04:05")))
-		return nil, fmt.Errorf("Error while serializing received Evidence")
+		fmt.Printf(red.Sprintf("[%s] Error computing Evidence digest\n", time.Now().Format("02-01-2006 15:04:05")))
+		return nil, fmt.Errorf("Error computing Evidence digest")
 	}
 
 	// process Evidence
-	_, err = verifyWorkerSignature(workerName, string(evidenceJSON), attestationResponse.Signature)
+	_, err = verifyWorkerSignature(workerName, evidenceDigest, attestationResponse.Signature)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Evidence Signature Verification failed: %s\n", time.Now().Format("02-01-2006 15:04:05"), err.Error()))
 		return &AttestationResult{
@@ -483,7 +508,7 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		}, fmt.Errorf("Evidence Signature verification failed")
 	}
 
-	PCRDigest, hashAlg, err := validateWorkerQuote(workerName, attestationResponse.Evidence.WorkerQuote, nonce)
+	PCR10Digest, hashAlg, err := validateWorkerQuote(workerName, attestationResponse.Evidence.WorkerQuote, nonce)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate Worker Quote: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return &AttestationResult{
@@ -495,7 +520,7 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		}, fmt.Errorf("Error while validating Worker Quote")
 	}
 
-	IMAPodEntries, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCRDigest, podUID)
+	IMAPodEntries, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCR10Digest, podUID)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate IMA measurement log: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return &AttestationResult{
@@ -569,16 +594,19 @@ func getPodImageNameByUID(podUID string) (string, error) {
 	return "", fmt.Errorf("no pod found with UID %s", podUID)
 }
 
-// extractSHADigest extracts the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
-func extractSHADigest(input string) (string, error) {
-	// Define a regular expression to match the prefix "sha<number>:"
+// extractSHADigest extracts the algorithm (e.g., "sha256") and the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
+func extractSHADigest(input string) (string, string, error) {
+	// Define a regular expression to match the prefix "sha<number>:" followed by the hex digest
 	re := regexp.MustCompile(`^sha[0-9]+:`)
 
-	if re.MatchString(input) {
-		// Remove the matching prefix and return the remaining part (hex digest)
-		return re.ReplaceAllString(input, ""), nil
+	// Check if the input matches the expected format
+	if matches := re.FindStringSubmatch(input); matches != nil {
+		fileHashElements := strings.Split(input, ":")
+
+		return fileHashElements[0], fileHashElements[1], nil
 	}
-	return "", fmt.Errorf("input does not have a valid sha<algo>: prefix")
+
+	return "", "", fmt.Errorf("input does not have a valid sha<algo>:<hex_digest> format")
 }
 
 // Helper function to compute the new hash by concatenating previous hash and template hash
@@ -601,19 +629,22 @@ func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) 
 }
 
 // IMAVerification checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software and the AttestationResult
-func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry, error) {
-	// Step 1: Decode the base64-encoded IMA log
+func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEntry, error) {
+	isIMAValid := false
+
 	decodedLog, err := base64.StdEncoding.DecodeString(IMAMeasurementLog)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode IMA measurement log: %v", err)
 	}
 
-	// Step 2: Convert the decoded log to a string and split it into lines
 	logLines := strings.Split(string(decodedLog), "\n")
+	if len(logLines) > 0 && logLines[len(logLines)-1] == "" {
+		logLines = logLines[:len(logLines)-1] // Remove the last empty line --> each entry adds a \n so last line will add an empty line
+	}
 	uniqueEntries := make(map[string]IMAPodEntry)
 
 	// initial PCR configuration
-	previousHash := make([]byte, 20)
+	previousHash := make([]byte, 32)
 
 	// Iterate through each line and extract relevant fields
 	for idx, IMALine := range logLines {
@@ -626,15 +657,30 @@ func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry
 		templateHashField := IMAFields[1]
 		depField := IMAFields[3]
 		cgroupPathField := IMAFields[4]
+		fileHashField := IMAFields[5]
+		filePathField := IMAFields[6]
 
-		// Use the helper function to extend the IMA entries with the current template hash field
-		newHash, err := extendIMAEntries(previousHash, templateHashField)
+		hashAlgo, fileHash, err := extractSHADigest(fileHashField)
+		if err != nil {
+			return nil, fmt.Errorf("IMA measurement log integrity check failed: entry: %d file hash is invalid: %s", idx, IMALine)
+		}
+
+		extendValue, err := validateIMAEntry(templateHashField, depField, cgroupPathField, hashAlgo, fileHash, filePathField)
+		if err != nil {
+			return nil, fmt.Errorf("IMA measurement log integrity check failed: entry: %d is invalid: %s", idx, IMALine)
+		}
+
+		// Use the helper function to extend ML cumulative hash with the newly computed template hash
+		extendedHash, err := extendIMAEntries(previousHash, extendValue)
 		if err != nil {
 			return nil, fmt.Errorf("Error computing hash at index %d: %v\n", idx, err)
 		}
 
 		// Update the previous hash for the next iteration
-		previousHash = newHash
+		previousHash = extendedHash
+		if !isIMAValid && hex.EncodeToString(extendedHash) == PCR10Digest {
+			isIMAValid = true
+		}
 
 		// check if entry belongs to container or host, otherwise after having computed the extend hash, go to next entry in IMA ML
 		if !strings.Contains(depField, "containerd") {
@@ -643,20 +689,14 @@ func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry
 
 		// Check if the cgroup path contains the podUID
 		if checkPodUIDMatch(cgroupPathField, podUID) {
-			// Extract the file hash and file path (sixth and seventh elements)
-			fileHash, err := extractSHADigest(IMAFields[5])
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode file hash field: %v", err)
-			}
-			filePath := IMAFields[6]
 
 			// Create a unique key by combining filePath and fileHash
-			entryKey := fmt.Sprintf("%s:%s", filePath, fileHash)
+			entryKey := fmt.Sprintf("%s:%s", filePathField, fileHash)
 
 			// Add the entry to the map if it doesn't exist
 			if _, exists := uniqueEntries[entryKey]; !exists {
 				uniqueEntries[entryKey] = IMAPodEntry{
-					FilePath: filePath,
+					FilePath: filePathField,
 					FileHash: fileHash,
 				}
 			}
@@ -665,9 +705,9 @@ func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry
 
 	// Convert the final hash to a hex string for comparison
 	cumulativeHashIMAHex := hex.EncodeToString(previousHash)
-	// Compare the computed hash with the provided PCRDigest
-	if cumulativeHashIMAHex != PCRDigest {
-		return nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match PCRDigest")
+	// Compare the computed hash with the provided PCR10Digest
+	if cumulativeHashIMAHex != PCR10Digest {
+		return nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match quote value")
 	}
 
 	// Convert the unique entries back to a slice
@@ -678,6 +718,102 @@ func IMAVerification(IMAMeasurementLog, PCRDigest, podUID string) ([]IMAPodEntry
 
 	// Return the collected IMA pod entries
 	return IMAPodEntries, nil
+}
+
+func computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePath []byte) (string, string) {
+	packedTemplateEntry := append(packedDep, packedCgroup...)
+	packedTemplateEntry = append(packedTemplateEntry, packedFileHash...)
+	packedTemplateEntry = append(packedTemplateEntry, packedFilePath...)
+	sha1Hash := sha1.Sum(packedTemplateEntry)
+	sha256Hash := sha256.Sum256(packedTemplateEntry)
+
+	return hex.EncodeToString(sha1Hash[:]), hex.EncodeToString(sha256Hash[:])
+}
+
+// Function to pack IMA hash
+func packIMAHash(hashAlg string, fileHash []byte) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Pack total length (algorithm + 2 extra bytes + hash length)
+	totalLen := uint32(len(hashAlg) + 2 + len(fileHash))
+	if err := binary.Write(buf, binary.LittleEndian, totalLen); err != nil {
+		return nil, fmt.Errorf("failed to pack total length: %v", err)
+	}
+
+	// Pack algorithm
+	if _, err := buf.Write([]byte(hashAlg)); err != nil {
+		return nil, fmt.Errorf("failed to pack algorithm: %v", err)
+	}
+
+	// Pack COLON_BYTE (1 byte)
+	if err := buf.WriteByte(COLON_BYTE); err != nil {
+		return nil, fmt.Errorf("failed to pack COLON_BYTE: %v", err)
+	}
+
+	// Pack NULL_BYTE (1 byte)
+	if err := buf.WriteByte(NULL_BYTE); err != nil {
+		return nil, fmt.Errorf("failed to pack NULL_BYTE: %v", err)
+	}
+
+	// Pack fileHash (len(fileHash) bytes)
+	if _, err := buf.Write(fileHash); err != nil {
+		return nil, fmt.Errorf("failed to pack fileHash: %v", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// Function to pack IMA path (similar to pack_ima_path in Python)
+func packIMAPath(path []byte) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Pack length (4 bytes)
+	length := uint32(len(path) + 1) // length + 1 for NULL_BYTE
+	if err := binary.Write(buf, binary.LittleEndian, length); err != nil {
+		return nil, fmt.Errorf("failed to pack length: %v", err)
+	}
+
+	// Pack path (len(path) bytes)
+	if _, err := buf.Write(path); err != nil {
+		return nil, fmt.Errorf("failed to pack path: %v", err)
+	}
+
+	// Pack NULL_BYTE (1 byte)
+	if err := binary.Write(buf, binary.LittleEndian, NULL_BYTE); err != nil {
+		return nil, fmt.Errorf("failed to pack NULL_BYTE: %v", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func validateIMAEntry(IMATemplateHash, depField, cgroupField, hashAlg, fileHash, filePathField string) (string, error) {
+	packedDep, err := packIMAPath([]byte(depField))
+	if err != nil {
+		return "", fmt.Errorf("Failed to pack 'dep' field")
+	}
+	packedCgroup, err := packIMAPath([]byte(cgroupField))
+	if err != nil {
+		return "", fmt.Errorf("Failed to pack 'cgroup' field")
+	}
+	decodedFileHash, err := hex.DecodeString(fileHash)
+	if err != nil {
+		return "", fmt.Errorf("Failed to decode 'file hash' field")
+	}
+	packedFileHash, err := packIMAHash(hashAlg, decodedFileHash)
+	if err != nil {
+		return "", fmt.Errorf("Failed to pack 'file hash' field")
+	}
+	packedFilePath, err := packIMAPath([]byte(filePathField))
+	if err != nil {
+		return "", fmt.Errorf("Failed to pack 'file path' field")
+	}
+
+	IMAEntrySha1, IMAEntrySha256 := computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePath)
+
+	if IMAEntrySha1 != IMATemplateHash {
+		return "", fmt.Errorf("computed template hash does not match stored entry template hash")
+	}
+	// return sha256 of entry to be extended
+	return IMAEntrySha256, nil
 }
 
 func checkPodUIDMatch(path, podUID string) bool {
@@ -697,11 +833,11 @@ func checkPodUIDMatch(path, podUID string) bool {
 }
 
 // Verify the provided signature by contacting Registrar API
-func verifyWorkerSignature(workerName, message, signature string) (bool, error) {
+func verifyWorkerSignature(workerName string, message []byte, signature string) (bool, error) {
 	registrarURL := fmt.Sprintf("http://%s:%s/worker/verify", registrarHOST, registrarPORT)
 	payload := map[string]string{
 		"name":      workerName,
-		"message":   message,
+		"message":   base64.StdEncoding.EncodeToString(message),
 		"signature": signature,
 	}
 
@@ -743,7 +879,7 @@ func validateWorkerQuote(workerName, quoteJSON, nonce string) (string, string, e
 	// decode nonce from hex
 	nonceBytes, err := hex.DecodeString(nonce)
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to decode ")
+		return "", "", fmt.Errorf("Failed to decode: %v", err)
 	}
 
 	// Parse inputQuote JSON
@@ -771,7 +907,7 @@ func validateWorkerQuote(workerName, quoteJSON, nonce string) (string, string, e
 	}
 
 	// Verify the signature
-	quoteSignatureIsValid, err := verifyWorkerSignature(workerName, string(quoteBytes), base64.StdEncoding.EncodeToString(sig.RSA.Signature))
+	quoteSignatureIsValid, err := verifyWorkerSignature(workerName, quoteBytes, base64.StdEncoding.EncodeToString(sig.RSA.Signature))
 	if !quoteSignatureIsValid {
 		return "", "", fmt.Errorf("Quote Signature verification failed: %v", err)
 	}
@@ -812,7 +948,7 @@ func validateWorkerQuote(workerName, quoteJSON, nonce string) (string, string, e
 		return "", "", fmt.Errorf("PCRs digest validation failed: %v", err)
 	}
 
-	return hex.EncodeToString(attestedQuoteInfo.PCRDigest), quotePCRs.GetHash().String(), nil
+	return hex.EncodeToString(quotePCRs.GetPcrs()[10]), quotePCRs.GetHash().String(), nil
 }
 
 func convertToCryptoHash(algo pb.HashAlgo) (crypto.Hash, error) {
@@ -895,13 +1031,15 @@ func SamePCRSelection(p *pb.PCRs, sel tpm2legacy.PCRSelection) bool {
 }
 
 func verifyPodFilesIntegrity(checkRequest PodWhitelistCheckRequest) error {
-	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/pod/check", whitelistHOST, whitelistPORT)
+	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/pod/image/check", whitelistHOST, whitelistPORT)
 
 	// Marshal the attestation request to JSON
 	jsonPayload, err := json.Marshal(checkRequest)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Whitelist check request: %v", err)
 	}
+
+	log.Printf(string(jsonPayload))
 
 	// Make the POST request to the agent
 	resp, err := http.Post(whitelistProviderWorkerValidateURL, "application/json", bytes.NewBuffer(jsonPayload))

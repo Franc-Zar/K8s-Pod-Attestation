@@ -434,7 +434,7 @@ func decodePublicKeyFromPEM(publicKeyPEM string) (*rsa.PublicKey, error) {
 }
 
 // Utility function: Verify a signature using provided public key
-func verifySignature(publicKeyPEM string, message, signature string) error {
+func verifySignature(publicKeyPEM, message, signature string) error {
 	rsaPubKey, err := decodePublicKeyFromPEM(publicKeyPEM)
 
 	hashed := sha256.Sum256([]byte(message))
@@ -694,8 +694,14 @@ func verifyWorkerSignature(c *gin.Context) {
 		return
 	}
 
+	decodedMessage, err := base64.StdEncoding.DecodeString(req.Message)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Failed to decode message from base64", "status": "error"})
+		return
+	}
+
 	// Verify signature
-	if err := verifySignature(worker.AIK, req.Message, req.Signature); err != nil {
+	if err := verifySignature(worker.AIK, string(decodedMessage), req.Signature); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"message": "Signature verification failed", "status": "error"})
 		return
 	}
