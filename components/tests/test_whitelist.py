@@ -34,7 +34,7 @@ worker_data_to_append = {
 
 store_pod_data = {
     "imageName": "redis:latest",
-    "imageDigest": "sha256:a06cea905344470eb49c972f3d030e22f28f632c1b4f43bbe4a26a4329dd6be5",
+    "imageDigest": "docker.io/library/redis@sha256:a06cea905344470eb49c972f3d030e22f28f632c1b4f43bbe4a26a4329dd6be5",
     "validFiles": [
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libc.so.6",

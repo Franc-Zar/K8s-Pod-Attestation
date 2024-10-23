@@ -89,9 +89,10 @@ type IMAPodEntry struct {
 }
 
 type PodWhitelistCheckRequest struct {
-	PodImageName string        `json:"podImageName"`
-	PodFiles     []IMAPodEntry `json:"podFiles"`
-	HashAlg      string        `json:"hashAlg"` // Include the hash algorithm in the request
+	PodImageName   string        `json:"podImageName"`
+	PodImageDigest string        `json:"podImageDigest"`
+	PodFiles       []IMAPodEntry `json:"podFiles"`
+	HashAlg        string        `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 type AttestationResult struct {
@@ -532,22 +533,23 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		}, fmt.Errorf("Failed to validate IMA Measurement log")
 	}
 
-	podImageName, err := getPodImageNameByUID(podUID)
+	podImageName, podImageDigest, err := getPodImageDataByUID(podUID)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to get image name of Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
+		fmt.Printf(red.Sprintf("[%s] Failed to get image name and digest of Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
 		return &AttestationResult{
 			Agent:      agentName,
 			Target:     podName,
 			TargetType: "Pod",
 			Result:     "UNTRUSTED",
-			Reason:     "Failed to get image name of attested Pod",
+			Reason:     "Failed to get image name and digest of attested Pod",
 		}, fmt.Errorf("Failed to get image name of attested Pod")
 	}
 
 	podCheckRequest := PodWhitelistCheckRequest{
-		PodImageName: podImageName,
-		PodFiles:     IMAPodEntries,
-		HashAlg:      hashAlg,
+		PodImageName:   podImageName,
+		PodImageDigest: podImageDigest,
+		PodFiles:       IMAPodEntries,
+		HashAlg:        hashAlg,
 	}
 
 	err = verifyPodFilesIntegrity(podCheckRequest)
@@ -572,26 +574,35 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 	}, nil
 }
 
-// getPodImageByUID retrieves the image of a pod given its UID
-func getPodImageNameByUID(podUID string) (string, error) {
+// getPodImageDataByUID retrieves the image and its digest of a pod given its UID
+func getPodImageDataByUID(podUID string) (string, string, error) {
 	// List all pods in the cluster (you may want to filter by namespace in production)
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		return "", fmt.Errorf("failed to list pods: %v", err)
+		return "", "", fmt.Errorf("failed to list pods: %v", err)
 	}
 
 	// Iterate over the pods to find the one with the matching UID
 	for _, pod := range pods.Items {
 		if string(pod.UID) == podUID {
-			// If pod found, return the image of the first container (or modify to fit your need)
+			// If pod found, return the image and its digest (if available)
 			if len(pod.Spec.Containers) > 0 {
-				return pod.Spec.Containers[0].Image, nil
+				imageName := pod.Spec.Containers[0].Image
+				imageDigest := ""
+				// Check if image digest is available
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name == pod.Spec.Containers[0].Name && status.ImageID != "" {
+						imageDigest = status.ImageID
+						return imageName, imageDigest, nil
+					}
+				}
+				return "", "", fmt.Errorf("no image digest found in pod with UID %s", podUID)
 			}
-			return "", fmt.Errorf("no containers found in pod with UID %s", podUID)
+			return "", "", fmt.Errorf("no containers found in pod with UID %s", podUID)
 		}
 	}
 	// If no pod is found with the given UID
-	return "", fmt.Errorf("no pod found with UID %s", podUID)
+	return "", "", fmt.Errorf("no pod found with UID %s", podUID)
 }
 
 // extractSHADigest extracts the algorithm (e.g., "sha256") and the actual hex digest from a string with the format "sha<algo>:<hex_digest>"
