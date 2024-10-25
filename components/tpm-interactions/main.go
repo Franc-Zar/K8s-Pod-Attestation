@@ -16,6 +16,8 @@ import (
 	"fmt"
 	x509ext "github.com/google/go-attestation/x509"
 	"github.com/google/go-tpm-tools/client"
+	"github.com/google/go-tpm-tools/simulator"
+	"github.com/google/go-tpm/legacy/tpm2/credactivation"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -604,7 +606,7 @@ func computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePa
 }
 
 func main() {
-	rwc, err := tpmutil.OpenTPM("/dev/tpm0") //simulator.GetWithFixedSeedInsecure(1073741825)
+	rwc, err := simulator.GetWithFixedSeedInsecure(1073741825) //tpmutil.OpenTPM("/dev/tpm0")
 	if err != nil {
 		log.Fatalf("can't open TPM: %v", err)
 	}
@@ -614,10 +616,88 @@ func main() {
 		}
 	}()
 
+	// agent
 	akHandle := generateAK(rwc)
+	ek, _ := client.EndorsementKeyRSA(rwc)
+	retrievedAK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), akHandle)
+	defer retrievedAK.Close()
+	defer ek.Close()
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	akNameData, err := retrievedAK.Name().Encode()
+	if err != nil {
+		log.Fatalf("failed to encode AIK Name data")
+	}
+	akPublicArea, err := retrievedAK.PublicArea().Encode()
+	if err != nil {
+		log.Fatalf("failed to encode AIK public area")
+	}
+	akPublic := retrievedAK.PublicKey()
+	// --> send
 
-	validateQuote(rwc, akHandle)
+	// worker handler
+	retrievedName, err := tpm2legacy.DecodeName(bytes.NewBuffer(akNameData))
+	if err != nil {
+		log.Fatalf("Failed to decode received AIK Name")
+	}
 
+	if retrievedName.Digest == nil {
+		log.Fatalf("name was not a digest")
+	}
+
+	h, err := retrievedName.Digest.Alg.Hash()
+	if err != nil {
+		log.Fatalf("failed to get name hash: %v", err)
+	}
+
+	pubHash := h.New()
+	pubHash.Write(akPublicArea)
+	pubDigest := pubHash.Sum(nil)
+	if !bytes.Equal(retrievedName.Digest.Value, pubDigest) {
+		log.Fatalf("name was not for public blob")
+	}
+
+	retrievedAKPublicArea, err := tpm2legacy.DecodePublic(akPublicArea)
+	if err != nil {
+		log.Fatalf("Failed to decode received AIK Public Area")
+	}
+
+	if !retrievedAKPublicArea.MatchesTemplate(client.AKTemplateRSA()) {
+		log.Fatalf("provided AIK does not match AIK Template")
+	}
+
+	secret := []byte("Brevity is the soul of wit")
+	symBlockSize := 16
+	credBlob, encSecret, err := credactivation.Generate(retrievedName.Digest, akPublic, symBlockSize, secret)
+	if err != nil {
+		log.Fatalf("generate credential: %v", err)
+	}
+
+	// send -> agent
+	session, _, err := tpm2legacy.StartAuthSession(rwc,
+		tpm2legacy.HandleNull,
+		tpm2legacy.HandleNull,
+		make([]byte, 16),
+		nil,
+		tpm2legacy.SessionPolicy,
+		tpm2legacy.AlgNull,
+		tpm2legacy.AlgSHA256)
+	if err != nil {
+		log.Fatalf("creating auth session: %v", err)
+	}
+
+	auth := tpm2legacy.AuthCommand{Session: tpm2legacy.HandlePasswordSession, Attributes: tpm2legacy.AttrContinueSession}
+	if _, _, err := tpm2legacy.PolicySecret(rwc, tpm2legacy.HandleEndorsement, auth, session, nil, nil, nil, 0); err != nil {
+		log.Fatalf("policy secret failed: %v", err)
+	}
+
+	auths := []tpm2legacy.AuthCommand{auth, {Session: session, Attributes: tpm2legacy.AttrContinueSession}}
+	out, err := tpm2legacy.ActivateCredentialUsingAuth(rwc, auths, akHandle, ek.Handle(), credBlob[2:], encSecret[2:])
+	if err != nil {
+		log.Fatalf("activate credential: %v", err)
+	}
+	fmt.Printf("%s\n", out)
 }
 
 /*
