@@ -95,6 +95,12 @@ type PodWhitelistCheckRequest struct {
 	HashAlg        string        `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
+type ContainerRuntimeCheckRequest struct {
+	ContainerRuntimeName string `json:"containerRuntimeName"`
+	Digest               string `json:"digest"`
+	HashAlg              string `json:"hashAlg"` // Include the hash algorithm in the request
+}
+
 type AttestationResult struct {
 	Agent      string
 	Target     string
@@ -296,8 +302,8 @@ func deleteAttestationRequestCRDInstance(crdObj interface{}) {
 	return
 }
 
-// GenerateNonce creates a random nonce of specified byte length
-func GenerateNonce(size int) (string, error) {
+// generateNonce creates a random nonce of specified byte length
+func generateNonce(size int) (string, error) {
 	nonce := make([]byte, size)
 
 	// Fill the byte slice with random data
@@ -444,7 +450,7 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		return nil, fmt.Errorf("Invalid Attestation request: %v", err)
 	}
 
-	nonce, err := GenerateNonce(16)
+	nonce, err := generateNonce(16)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error while generating nonce\n", time.Now().Format("02-01-2006 15:04:05")))
 		return nil, fmt.Errorf("Failed to generate nonce to be sent to the Agent")
@@ -521,8 +527,8 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		}, fmt.Errorf("Error while validating Worker Quote")
 	}
 
-	IMAPodEntries, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCR10Digest, podUID)
-	if err != nil {
+	IMAPodEntries, containerRuntimeCheckRequest, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCR10Digest, podUID)
+	if err != nil || containerRuntimeCheckRequest == nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate IMA measurement log: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return &AttestationResult{
 			Agent:      agentName,
@@ -552,6 +558,18 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		HashAlg:        hashAlg,
 	}
 
+	err = verifyContainerRuntimeIntegrity(*containerRuntimeCheckRequest)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to verify integrity of Container Runtime: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), containerRuntimeCheckRequest.ContainerRuntimeName, err))
+		return &AttestationResult{
+			Agent:      agentName,
+			Target:     workerName,
+			TargetType: "Node",
+			Result:     "UNTRUSTED",
+			Reason:     "Failed to verify integrity of Container Runtime",
+		}, fmt.Errorf("Failed to verify integrity of Container Runtime")
+	}
+
 	err = verifyPodFilesIntegrity(podCheckRequest)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to verify integrity of files executed by Pod: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), podName, err))
@@ -572,6 +590,39 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		Result:     "TRUSTED",
 		Reason:     "Attestation ended with success",
 	}, nil
+}
+
+func verifyContainerRuntimeIntegrity(checkRequest ContainerRuntimeCheckRequest) error {
+	whitelistProviderWorkerValidateURL := fmt.Sprintf("http://%s:%s/whitelist/container/runtime/check", whitelistHOST, whitelistPORT)
+
+	// Marshal the attestation request to JSON
+	jsonPayload, err := json.Marshal(checkRequest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Whitelist check request: %v", err)
+	}
+
+	log.Printf(string(jsonPayload))
+
+	// Make the POST request to the agent
+	resp, err := http.Post(whitelistProviderWorkerValidateURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to send Whitelist check request: %v", err)
+	}
+
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Whitelists Provider failed to process check request: %s (status: %d)", string(body), resp.StatusCode)
+	}
+
+	return nil
 }
 
 // getPodImageDataByUID retrieves the image and its digest of a pod given its UID
@@ -640,12 +691,13 @@ func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) 
 }
 
 // IMAVerification checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software and the AttestationResult
-func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEntry, error) {
+func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEntry, *ContainerRuntimeCheckRequest, error) {
 	isIMAValid := false
+	var containerRuntimeCheckRequest ContainerRuntimeCheckRequest
 
 	decodedLog, err := base64.StdEncoding.DecodeString(IMAMeasurementLog)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode IMA measurement log: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode IMA measurement log: %v", err)
 	}
 
 	logLines := strings.Split(string(decodedLog), "\n")
@@ -662,7 +714,7 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 		// Split the line by whitespace
 		IMAFields := strings.Fields(IMALine)
 		if len(IMAFields) < 7 {
-			return nil, fmt.Errorf("IMA measurement log integrity check failed: entry %d not compliant with template: %s", idx, IMALine)
+			return nil, nil, fmt.Errorf("IMA measurement log integrity check failed: entry %d not compliant with template: %s", idx, IMALine)
 		}
 
 		templateHashField := IMAFields[1]
@@ -673,18 +725,18 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 
 		hashAlgo, fileHash, err := extractSHADigest(fileHashField)
 		if err != nil {
-			return nil, fmt.Errorf("IMA measurement log integrity check failed: entry: %d file hash is invalid: %s", idx, IMALine)
+			return nil, nil, fmt.Errorf("IMA measurement log integrity check failed: entry: %d file hash is invalid: %s", idx, IMALine)
 		}
 
 		extendValue, err := validateIMAEntry(templateHashField, depField, cgroupPathField, hashAlgo, fileHash, filePathField)
 		if err != nil {
-			return nil, fmt.Errorf("IMA measurement log integrity check failed: entry: %d is invalid: %s", idx, IMALine)
+			return nil, nil, fmt.Errorf("IMA measurement log integrity check failed: entry: %d is invalid: %s", idx, IMALine)
 		}
 
 		// Use the helper function to extend ML cumulative hash with the newly computed template hash
 		extendedHash, err := extendIMAEntries(previousHash, extendValue)
 		if err != nil {
-			return nil, fmt.Errorf("Error computing hash at index %d: %v\n", idx, err)
+			return nil, nil, fmt.Errorf("Error computing hash at index %d: %v\n", idx, err)
 		}
 
 		// Update the previous hash for the next iteration
@@ -696,6 +748,12 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 		// check if entry belongs to container or host, otherwise after having computed the extend hash, go to next entry in IMA ML
 		if !strings.Contains(depField, "containerd") {
 			continue
+		}
+
+		if filePathField == "/usr/bin/containerd-shim-runc-v2" {
+			containerRuntimeCheckRequest.ContainerRuntimeName = filePathField
+			containerRuntimeCheckRequest.Digest = fileHash
+			containerRuntimeCheckRequest.HashAlg = hashAlgo
 		}
 
 		// Check if the cgroup path contains the podUID
@@ -718,7 +776,7 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 	cumulativeHashIMAHex := hex.EncodeToString(previousHash)
 	// Compare the computed hash with the provided PCR10Digest
 	if cumulativeHashIMAHex != PCR10Digest {
-		return nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match quote value")
+		return nil, nil, fmt.Errorf("IMA measurement log integrity check failed: computed hash does not match quote value")
 	}
 
 	// Convert the unique entries back to a slice
@@ -728,7 +786,7 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 	}
 
 	// Return the collected IMA pod entries
-	return IMAPodEntries, nil
+	return IMAPodEntries, &containerRuntimeCheckRequest, nil
 }
 
 func computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePath []byte) (string, string) {

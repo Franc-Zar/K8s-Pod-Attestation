@@ -1,5 +1,5 @@
 # Use a Golang base image for building the binary
-FROM golang:1.22 as builder
+FROM golang:1.23 as builder
 
 # Install OpenSSL library before building
 RUN apt-get update && apt-get install -y libssl-dev

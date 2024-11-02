@@ -14,7 +14,6 @@ import (
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-tpm-tools/client"
-	pb "github.com/google/go-tpm-tools/proto/tpm"
 	"github.com/google/go-tpm-tools/simulator"
 	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
@@ -27,10 +26,10 @@ import (
 	"strings"
 )
 
-type ImportBlobTransmitted struct {
-	Duplicate     string `json:"duplicate"`
-	EncryptedSeed string `json:"encrypted_seed"`
-	PublicArea    string `json:"public_area"`
+type RegistrationAcknowledge struct {
+	Message           string `json:"message"`
+	Status            string `json:"status"`
+	VerifierPublicKey string `json:"verifierPublicKey"`
 }
 
 type AttestationRequest struct {
@@ -52,6 +51,11 @@ type Evidence struct {
 type AttestationResponse struct {
 	Evidence  Evidence `json:"evidence"`
 	Signature string   `json:"signature,omitempty"`
+}
+
+type WorkerChallenge struct {
+	AIKCredential      string `json:"AIKCredential"`
+	AIKEncryptedSecret string `json:"AIKEncryptedSecret"`
 }
 
 var (
@@ -80,6 +84,7 @@ pQIDAQAB
 var (
 	rwc       io.ReadWriteCloser
 	AIKHandle tpmutil.Handle
+	EKHandle  tpmutil.Handle
 )
 
 func openTPM() {
@@ -137,11 +142,14 @@ func getWorkerPublicAIK() (crypto.PublicKey, error) {
 }
 
 // Mock function to get EK (Endorsement Key)
-func getWorkerEKandCertificate() (crypto.PublicKey, string, error) {
+func getWorkerEKandCertificate() (crypto.PublicKey, string) {
 	EK, err := client.EndorsementKeyRSA(rwc)
 	if err != nil {
 		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
 	}
+
+	EKHandle = EK.Handle()
+
 	defer EK.Close()
 	var pemEKCert []byte
 
@@ -159,11 +167,11 @@ func getWorkerEKandCertificate() (crypto.PublicKey, string, error) {
 
 	pemPublicEK := encodePublicKeyToPEM(EK.PublicKey())
 
-	return pemPublicEK, string(pemEKCert), nil
+	return pemPublicEK, string(pemEKCert)
 }
 
 // Function to create a new AIK (Attestation Identity Key) for the Agent
-func createWorkerAIK() (crypto.PublicKey, error) {
+func createWorkerAIK() (string, string) {
 	AIK, err := client.AttestationKeyRSA(rwc)
 	if err != nil {
 		log.Fatalf("ERROR: could not get AttestationKeyRSA: %v", err)
@@ -173,10 +181,21 @@ func createWorkerAIK() (crypto.PublicKey, error) {
 	// used to later retrieve newly created AIK inside the TPM
 	AIKHandle = AIK.Handle()
 
-	pemPublicAIK := encodePublicKeyToPEM(AIK.PublicKey())
+	AIKNameData, err := AIK.Name().Encode()
+	if err != nil {
+		log.Fatalf("failed to encode AIK Name data")
+	}
 
-	// Return the public key part of the generated AIK
-	return pemPublicAIK, nil
+	AIKPublicArea, err := AIK.PublicArea().Encode()
+	if err != nil {
+		log.Fatalf("failed to encode AIK public area")
+	}
+
+	encodedNameData := base64.StdEncoding.EncodeToString(AIKNameData)
+	encodedPublicArea := base64.StdEncoding.EncodeToString(AIKPublicArea)
+
+	// Return AIK material
+	return encodedNameData, encodedPublicArea
 }
 
 // extract AIKDigest and ephemeral Key from received challenge
@@ -221,20 +240,10 @@ func encodePublicKeyToPEM(pubKey crypto.PublicKey) string {
 func getWorkerIdentifyingData(c *gin.Context) {
 	workerId = uuid.New().String()
 
-	workerEK, EKCert, err := getWorkerEKandCertificate()
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"message": err.Error(), "status": "error"})
-		return
-	}
+	workerEK, EKCert := getWorkerEKandCertificate()
+	workerAIKNameData, workerAIKPublicArea := createWorkerAIK()
 
-	workerAIK, err := createWorkerAIK()
-
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"message": err.Error(), "status": "error"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"UUID": workerId, "EK": workerEK, "EKCert": EKCert, "AIK": workerAIK})
+	c.JSON(http.StatusOK, gin.H{"UUID": workerId, "EK": workerEK, "EKCert": EKCert, "AIKNameData": workerAIKNameData, "AIKPublicArea": workerAIKPublicArea})
 }
 
 // Utility function: Verify a signature using provided public key
@@ -302,68 +311,6 @@ func signWithAIK(message []byte) (string, error) {
 		return "", fmt.Errorf("Failed to sign with AIK: %v", err)
 	}
 	return base64.StdEncoding.EncodeToString(AIKSignedData), nil
-}
-
-func decryptWithEK(encryptedData string) ([]byte, error) {
-	decodedChallenge, err := base64.StdEncoding.DecodeString(encryptedData)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding challenge")
-	}
-
-	var importBlobTransmitted ImportBlobTransmitted
-	err = json.Unmarshal(decodedChallenge, &importBlobTransmitted)
-	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling challenge: %v", err)
-	}
-
-	// Base64 decode the received data
-	duplicate, err := base64.StdEncoding.DecodeString(importBlobTransmitted.Duplicate)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding base64 data: %v", err)
-	}
-
-	encryptedSeed, err := base64.StdEncoding.DecodeString(importBlobTransmitted.EncryptedSeed)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding base64 data: %v", err)
-	}
-
-	publicArea, err := base64.StdEncoding.DecodeString(importBlobTransmitted.PublicArea)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding base64 data: %v", err)
-	}
-
-	blob := &pb.ImportBlob{
-		Duplicate:     duplicate,
-		EncryptedSeed: encryptedSeed,
-		PublicArea:    publicArea,
-		Pcrs:          nil,
-	}
-
-	// Retrieve the TPM's endorsement key (EK)
-	ek, err := client.EndorsementKeyRSA(rwc)
-	if err != nil {
-		return nil, fmt.Errorf("ERROR: could not get EndorsementKeyRSA: %v", err)
-	}
-	defer ek.Close()
-
-	// Decrypt the ImportBlob using the TPM EK
-	output, err := ek.Import(blob)
-	if err != nil {
-		return nil, fmt.Errorf("failed to import blob: %v", err)
-	}
-
-	return output, nil
-}
-
-// Helper function to calculate the AIK digest (mock)
-func computeAIKDigest(AIKPublicKey crypto.PublicKey) (string, error) {
-	// Calculate the digest of the mock AIK (using SHA-256 hash)
-	AIKBytes, err := x509.MarshalPKIXPublicKey(AIKPublicKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal AIK public key: %v", err)
-	}
-	hash := sha256.Sum256(AIKBytes)
-	return fmt.Sprintf("%x", hash), nil
 }
 
 // Helper function to compute HMAC using the ephemeral key
@@ -586,14 +533,56 @@ func quoteBootAggregate(nonce []byte) (string, error) {
 	return string(quoteJSON), nil
 }
 
-func challengeWorkerEK(c *gin.Context) {
-	// Define a struct to bind the incoming JSON request
-	var req struct {
-		WorkerChallenge string `json:"workerChallenge" binding:"required"`
+func activateAIKCredential(AIKCredential, AIKEncryptedSecret string) ([]byte, error) {
+	decodedCredential, err := base64.StdEncoding.DecodeString(AIKCredential)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode AIK Credential")
+	}
+	decodedSecret, err := base64.StdEncoding.DecodeString(AIKEncryptedSecret)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode AIK encrypted Secret")
 	}
 
+	// Initiate a session for PolicySecret, specific for endorsement
+	session, _, err := tpm2legacy.StartAuthSession(
+		rwc,
+		tpm2legacy.HandleNull,
+		tpm2legacy.HandleNull,
+		make([]byte, 16),
+		nil,
+		tpm2legacy.SessionPolicy,
+		tpm2legacy.AlgNull,
+		tpm2legacy.AlgSHA256,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating auth session failed: %v", err)
+	}
+
+	// Set PolicySecret on the endorsement handle, enabling EK use
+	auth := tpm2legacy.AuthCommand{Session: tpm2legacy.HandlePasswordSession, Attributes: tpm2legacy.AttrContinueSession}
+	if _, _, err := tpm2legacy.PolicySecret(rwc, tpm2legacy.HandleEndorsement, auth, session, nil, nil, nil, 0); err != nil {
+		return nil, fmt.Errorf("policy secret failed: %v", err)
+	}
+
+	// Create authorization commands, linking session and password auth
+	auths := []tpm2legacy.AuthCommand{
+		{Session: tpm2legacy.HandlePasswordSession, Attributes: tpm2legacy.AttrContinueSession},
+		{Session: session, Attributes: tpm2legacy.AttrContinueSession},
+	}
+
+	// Attempt to activate the credential
+	challengeSecret, err := tpm2legacy.ActivateCredentialUsingAuth(rwc, auths, AIKHandle, EKHandle, decodedCredential[2:], decodedSecret[2:])
+	if err != nil {
+		return nil, fmt.Errorf("AIK activate_credential failed: %v", err)
+	}
+
+	return challengeSecret, nil
+}
+
+func challengeWorkerEK(c *gin.Context) {
+	var workerChallenge WorkerChallenge
 	// Bind the JSON request body to the struct
-	if err := c.BindJSON(&req); err != nil {
+	if err := c.BindJSON(&workerChallenge); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"message": "Invalid request payload",
 			"status":  "error",
@@ -601,45 +590,18 @@ func challengeWorkerEK(c *gin.Context) {
 		return
 	}
 
-	// Decrypt the challenge using the mock private EK
-	decryptedData, err := decryptWithEK(req.WorkerChallenge)
+	challengeSecret, err := activateAIKCredential(workerChallenge.AIKCredential, workerChallenge.AIKEncryptedSecret)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
-			"message": "Decryption failed",
+			"message": "Agent failed to perform Credential Activation",
 			"status":  "error",
 		})
 		return
 	}
+	ephemeralKey := challengeSecret
+	quoteNonce := challengeSecret[:8]
 
-	receivedAIKDigest, receivedEphemeralKey, nonce, err := extractChallengeElements(string(decryptedData))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"message": "Malformed challenge",
-			"status":  "error",
-		})
-		return
-	}
-
-	retrievedAIKPublicKey, err := getWorkerPublicAIK()
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"message": "Error while retrieving Agent AIK",
-			"status":  "error",
-		})
-		return
-	}
-
-	// Calculate the mock AIK digest
-	expectedAIKDigest, err := computeAIKDigest(retrievedAIKPublicKey)
-	if err != nil || receivedAIKDigest != expectedAIKDigest {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"message": "AIK digest verification failed",
-			"status":  "error",
-		})
-		return
-	}
-
-	bootQuoteJSON, err := quoteBootAggregate(nonce)
+	bootQuoteJSON, err := quoteBootAggregate(quoteNonce)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"message": "Error while computing Boot Aggregate quote",
@@ -649,7 +611,7 @@ func challengeWorkerEK(c *gin.Context) {
 	}
 
 	// Compute HMAC on the worker UUID using the ephemeral key
-	hmacValue, err := computeHMAC([]byte(workerId), receivedEphemeralKey)
+	hmacValue, err := computeHMAC([]byte(workerId), ephemeralKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"message": "HMAC computation failed",
@@ -666,6 +628,31 @@ func challengeWorkerEK(c *gin.Context) {
 		"workerBootQuote": bootQuoteJSON,
 	})
 	return
+}
+
+func acknowledgeRegistration(c *gin.Context) {
+	var acknowledge RegistrationAcknowledge
+	// Bind the JSON request body to the struct
+	if err := c.BindJSON(&acknowledge); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": "Invalid request payload",
+			"status":  "error",
+		})
+		return
+	}
+
+	if acknowledge.Status == "success" {
+		verifierPublicKey = acknowledge.VerifierPublicKey
+		c.JSON(http.StatusCreated, gin.H{
+			"message": "Agent acknowledged success of registration and obtained Verifier Public Key",
+			"status":  "success",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Agent acknowledged failure of registration",
+		"status":  "error",
+	})
 }
 
 func main() {
@@ -685,10 +672,11 @@ func main() {
 	r := gin.Default()
 
 	// Define routes for the Tenant API
-	r.GET("/agent/worker/identify", getWorkerIdentifyingData) // GET worker identifying data (newly generated UUID, AIK, EK)
-	r.POST("/agent/worker/challenge", challengeWorkerEK)      // POST challenge worker for Registration
-	r.POST("/agent/pod/attest", podAttestation)               // POST attestation against one Pod running upon Worker of this agent
+	r.GET("/agent/worker/registration/identify", getWorkerIdentifyingData) // GET worker identifying data (newly generated UUID, AIK, EK)
+	r.POST("/agent/worker/registration/challenge", challengeWorkerEK)      // POST challenge worker for Registration
+	r.POST("/agent/worker/registration/acknowledge", acknowledgeRegistration)
 
+	r.POST("/agent/pod/attest", podAttestation) // POST attestation against one Pod running upon Worker of this agent
 	// Start the server
 	fmt.Printf(green.Sprintf("Agent is running on port: %s\n", agentPORT))
 	err := r.Run(":" + agentPORT)

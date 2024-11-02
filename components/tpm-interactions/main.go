@@ -617,23 +617,29 @@ func main() {
 	}()
 
 	// agent
-	akHandle := generateAK(rwc)
-	ek, _ := client.EndorsementKeyRSA(rwc)
-	retrievedAK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), akHandle)
-	defer retrievedAK.Close()
+	ak, err := client.AttestationKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR:  could not get AttestationKeyRSA: %v", err)
+	}
+	defer ak.Close()
+	ek, err := client.EndorsementKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR:  could not get AttestationKeyRSA: %v", err)
+	}
 	defer ek.Close()
+
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
-	akNameData, err := retrievedAK.Name().Encode()
+	akNameData, err := ak.Name().Encode()
 	if err != nil {
 		log.Fatalf("failed to encode AIK Name data")
 	}
-	akPublicArea, err := retrievedAK.PublicArea().Encode()
+	akPublicArea, err := ak.PublicArea().Encode()
 	if err != nil {
 		log.Fatalf("failed to encode AIK public area")
 	}
-	akPublic := retrievedAK.PublicKey()
+	ekPublic := ek.PublicKey()
 	// --> send
 
 	// worker handler
@@ -667,37 +673,50 @@ func main() {
 		log.Fatalf("provided AIK does not match AIK Template")
 	}
 
-	secret := []byte("Brevity is the soul of wit")
+	// The shared secret and symmetric block size for the credential blob
+	secret := []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbb")
 	symBlockSize := 16
-	credBlob, encSecret, err := credactivation.Generate(retrievedName.Digest, akPublic, symBlockSize, secret)
+
+	// Re-generate the credential blob and encrypted secret based on AK public info
+	credBlob, encSecret, err := credactivation.Generate(retrievedName.Digest, ekPublic, symBlockSize, secret)
 	if err != nil {
-		log.Fatalf("generate credential: %v", err)
+		log.Fatalf("failed to generate credential blob: %v", err)
 	}
 
-	// send -> agent
-	session, _, err := tpm2legacy.StartAuthSession(rwc,
+	// Initiate a session for PolicySecret, specific for endorsement
+	session, _, err := tpm2legacy.StartAuthSession(
+		rwc,
 		tpm2legacy.HandleNull,
 		tpm2legacy.HandleNull,
-		make([]byte, 16),
-		nil,
+		make([]byte, 16), // Nonce caller
+		nil,              // Encrypted salt
 		tpm2legacy.SessionPolicy,
 		tpm2legacy.AlgNull,
-		tpm2legacy.AlgSHA256)
+		tpm2legacy.AlgSHA256,
+	)
 	if err != nil {
-		log.Fatalf("creating auth session: %v", err)
+		log.Fatalf("creating auth session failed: %v", err)
 	}
 
+	// Set PolicySecret on the endorsement handle, enabling EK use
 	auth := tpm2legacy.AuthCommand{Session: tpm2legacy.HandlePasswordSession, Attributes: tpm2legacy.AttrContinueSession}
 	if _, _, err := tpm2legacy.PolicySecret(rwc, tpm2legacy.HandleEndorsement, auth, session, nil, nil, nil, 0); err != nil {
 		log.Fatalf("policy secret failed: %v", err)
 	}
 
-	auths := []tpm2legacy.AuthCommand{auth, {Session: session, Attributes: tpm2legacy.AttrContinueSession}}
-	out, err := tpm2legacy.ActivateCredentialUsingAuth(rwc, auths, akHandle, ek.Handle(), credBlob[2:], encSecret[2:])
-	if err != nil {
-		log.Fatalf("activate credential: %v", err)
+	// Create authorization commands, linking session and password auth
+	auths := []tpm2legacy.AuthCommand{
+		{Session: tpm2legacy.HandlePasswordSession, Attributes: tpm2legacy.AttrContinueSession},
+		{Session: session, Attributes: tpm2legacy.AttrContinueSession},
 	}
-	fmt.Printf("%s\n", out)
+
+	// Attempt to activate the credential
+	out, err := tpm2legacy.ActivateCredentialUsingAuth(rwc, auths, ak.Handle(), ek.Handle(), credBlob[2:], encSecret[2:])
+	if err != nil {
+		log.Fatalf("activate credential failed: %v", err)
+	}
+
+	fmt.Printf("Activation output: %s\n", out)
 }
 
 /*
@@ -1120,9 +1139,14 @@ func generateAK(rwc io.ReadWriter) tpmutil.Handle {
 		log.Fatalf("ERROR:  could not get AttestationKeyRSA: %v", err)
 	}
 	defer ak.Close()
-
-	log.Printf("---------------- Attestation Key ----------------")
-	log.Printf(encodePublicKeyToPEM(ak.PublicKey()))
-
 	return ak.Handle()
+}
+
+func generateEK(rwc io.ReadWriter) tpmutil.Handle {
+	ek, err := client.EndorsementKeyRSA(rwc)
+	if err != nil {
+		log.Fatalf("ERROR:  could not get AttestationKeyRSA: %v", err)
+	}
+	defer ek.Close()
+	return ek.Handle()
 }

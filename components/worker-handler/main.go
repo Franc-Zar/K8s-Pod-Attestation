@@ -17,9 +17,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/fatih/color"
+	"github.com/google/go-tpm-tools/client"
 	pb "github.com/google/go-tpm-tools/proto/tpm"
-	"github.com/google/go-tpm-tools/server"
 	tpm2legacy "github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/legacy/tpm2/credactivation"
 	"github.com/google/go-tpm/tpmutil"
 	"io"
 	appsv1 "k8s.io/api/apps/v1"
@@ -56,10 +57,11 @@ type WorkerNode struct {
 }
 
 type WorkerResponse struct {
-	UUID   string `json:"UUID"`
-	EK     string `json:"EK"`
-	EKCert string `json:"EKCert"`
-	AIK    string `json:"AIK"`
+	UUID          string `json:"UUID"`
+	EK            string `json:"EK"`
+	EKCert        string `json:"EKCert"`
+	AIKNameData   string `json:"AIKNameData"`
+	AIKPublicArea string `json:"AIKPublicArea"`
 }
 
 type NewWorkerResponse struct {
@@ -69,7 +71,8 @@ type NewWorkerResponse struct {
 }
 
 type WorkerChallenge struct {
-	WorkerChallenge string `json:"workerChallenge"`
+	AIKCredential      string `json:"AIKCredential"`
+	AIKEncryptedSecret string `json:"AIKEncryptedSecret"`
 }
 
 type WorkerChallengeResponse struct {
@@ -77,12 +80,6 @@ type WorkerChallengeResponse struct {
 	Status          string `json:"status"`
 	HMAC            string `json:"HMAC"`
 	WorkerBootQuote string `json:"workerBootQuote"`
-}
-
-type ImportBlobTransmitted struct {
-	Duplicate     string `json:"duplicate"`
-	EncryptedSeed string `json:"encrypted_seed"`
-	PublicArea    string `json:"public_area"`
 }
 
 type InputQuote struct {
@@ -95,6 +92,12 @@ type InputQuote struct {
 type PCRSet struct {
 	Hash int               `json:"hash"`
 	PCRs map[string]string `json:"pcrs"`
+}
+
+type RegistrationAcknowledge struct {
+	Message           string `json:"message"`
+	Status            string `json:"status"`
+	VerifierPublicKey string `json:"verifierPublicKey"`
 }
 
 type WorkerWhitelistCheckRequest struct {
@@ -124,6 +127,7 @@ var (
 	whitelistPORT                string
 	agentServicePortAllocation   int32 = 9090
 	agentNodePortAllocation      int32 = 31000
+	verifierPublicKey                  = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuoi/38EDObItiLd1Q8Cy\nXsPaHjOreYqVJYEO4NfCZR2H01LXrdj/LcpyrB1rKBc4UWI8lroSdhjMJxC62372\nWvDk9cD5k+iyPwdM+EggpiRfEmHWF3zob8junyWHW6JInf0+AGhbKgBfMXo9PvAn\nr5CVeqp2BrstdZtrWVRuQAKip9c7hl+mHODkE5yb0InHyRe5WWr5P7wtXtAPM6SO\n8dVk/QWXdsB9rsb+Ejy4LHSIUpHUOZO8LvGD1rVLO82H4EUXKBFeiOEJjly4HOkv\nmFe/c/Cma1pM+702X6ULf0/BIMJkWzD3INdLtk8FE8rIxrrMSnDtmWw9BgGdsDgk\npQIDAQAB\n-----END PUBLIC KEY-----\n"
 )
 
 // initializeColors sets up color variables for console output.
@@ -273,8 +277,7 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 								},
 							},
 						},
-					},
-					// Ensure pod is deployed on the new worker node
+					}, // Ensure pod is deployed on the new worker node
 					NodeSelector: map[string]string{
 						"kubernetes.io/hostname": newWorker.GetName(),
 					},
@@ -323,28 +326,6 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 	agentNodePortAllocation += 1
 	agentServicePortAllocation += 1
 	return true, agentHOST, fmt.Sprintf("%d", agentPORT)
-}
-
-// Encrypts data with the provided public key derived from the ephemeral key (EK)
-func encryptWithEK(publicEK *rsa.PublicKey, plaintext []byte) (string, error) {
-	// Create the ImportBlob using the public EK
-	importBlob, err := server.CreateImportBlob(publicEK, plaintext, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt challenge")
-	}
-
-	importBlobToSend := ImportBlobTransmitted{
-		Duplicate:     base64.StdEncoding.EncodeToString(importBlob.Duplicate),
-		EncryptedSeed: base64.StdEncoding.EncodeToString(importBlob.EncryptedSeed),
-		PublicArea:    base64.StdEncoding.EncodeToString(importBlob.PublicArea),
-	}
-
-	importBlobToSendJSON, err := json.Marshal(importBlobToSend)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal encrypted challenge")
-	}
-
-	return base64.StdEncoding.EncodeToString(importBlobToSendJSON), nil
 }
 
 // configureKubernetesClient initializes the Kubernetes client.
@@ -478,16 +459,6 @@ func nodeIsControlPlane(node *corev1.Node) bool {
 	return exists
 }
 
-// Calculate the AIK digest (mock)
-func calculateAIKDigest(AIKPublicKey *rsa.PublicKey) (string, error) {
-	AIKBytes, err := x509.MarshalPKIXPublicKey(AIKPublicKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal AIK public key: %v", err)
-	}
-	hash := sha256.Sum256(AIKBytes)
-	return fmt.Sprintf("%x", hash), nil
-}
-
 func decodePublicKeyFromPEM(publicKeyPEM string) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
@@ -591,6 +562,79 @@ func waitForAgent(retryInterval, timeout time.Duration, agentHOST, agentPORT str
 	}
 }
 
+func validateAIKPublicData(AIKNameData, AIKPublicArea string) (*rsa.PublicKey, error) {
+	decodedNameData, err := base64.StdEncoding.DecodeString(AIKNameData)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode AIK Name data")
+	}
+
+	decodedPublicArea, err := base64.StdEncoding.DecodeString(AIKPublicArea)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode AIK Name data")
+	}
+
+	retrievedName, err := tpm2legacy.DecodeName(bytes.NewBuffer(decodedNameData))
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode AIK Name")
+	}
+
+	if retrievedName.Digest == nil {
+		return nil, fmt.Errorf("AIK Name is not a digest")
+	}
+
+	hash, err := retrievedName.Digest.Alg.Hash()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AIK Name hash: %v", err)
+	}
+
+	pubHash := hash.New()
+	pubHash.Write(decodedPublicArea)
+	pubDigest := pubHash.Sum(nil)
+	if !bytes.Equal(retrievedName.Digest.Value, pubDigest) {
+		return nil, fmt.Errorf("Computed AIK Name does not match received Name digest")
+	}
+
+	retrievedAKPublicArea, err := tpm2legacy.DecodePublic(decodedPublicArea)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode received AIK Public Area")
+	}
+
+	if !retrievedAKPublicArea.MatchesTemplate(client.AKTemplateRSA()) {
+		return nil, fmt.Errorf("provided AIK does not match AIK Template")
+	}
+
+	AIKPub, err := retrievedAKPublicArea.Key()
+	if err != nil {
+		return nil, fmt.Errorf("Failed to retrieve AIK Public Key from AIK Public Area")
+	}
+
+	return AIKPub.(*rsa.PublicKey), nil
+}
+
+func generateCredentialActivation(AIKNameData string, ekPublic *rsa.PublicKey, activateCredentialSecret []byte) (string, string, error) {
+	decodedNameData, err := base64.StdEncoding.DecodeString(AIKNameData)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode AIK Name data")
+	}
+
+	retrievedName, err := tpm2legacy.DecodeName(bytes.NewBuffer(decodedNameData))
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to decode AIK Name")
+	}
+
+	symBlockSize := 16
+	// Re-generate the credential blob and encrypted secret based on AK public info
+	credentialBlob, encryptedSecret, err := credactivation.Generate(retrievedName.Digest, ekPublic, symBlockSize, activateCredentialSecret)
+	if err != nil {
+		return "", "", fmt.Errorf("Failed to generate credential activation challenge: %v", err)
+	}
+
+	encodedCredentialBlob := base64.StdEncoding.EncodeToString(credentialBlob)
+	encodedEncryptedSecret := base64.StdEncoding.EncodeToString(encryptedSecret)
+
+	return encodedCredentialBlob, encodedEncryptedSecret, nil
+}
+
 // generateNonce creates a random nonce of specified byte length
 func generateNonce(size int) (string, error) {
 	nonce := make([]byte, size)
@@ -605,10 +649,24 @@ func generateNonce(size int) (string, error) {
 	return hex.EncodeToString(nonce), nil
 }
 
+// Helper function to encode the public key to PEM format (for printing)
+func encodePublicKeyToPEM(pubKey crypto.PublicKey) string {
+	pubASN1, err := x509.MarshalPKIXPublicKey(pubKey)
+	if err != nil {
+		return ""
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY", // Use "PUBLIC KEY" for X.509 encoded keys
+		Bytes: pubASN1,
+	})
+	return string(pubPEM)
+}
+
 // workerRegistration registers the worker node by calling the identification API
 func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) bool {
-	agentIdentifyURL := fmt.Sprintf("http://%s:%s/agent/worker/identify", agentHOST, agentPORT)
-	agentChallengeNodeURL := fmt.Sprintf("http://%s:%s/agent/worker/challenge", agentHOST, agentPORT)
+	agentIdentifyURL := fmt.Sprintf("http://%s:%s/agent/worker/registration/identify", agentHOST, agentPORT)
+	agentChallengeNodeURL := fmt.Sprintf("http://%s:%s/agent/worker/registration/challenge", agentHOST, agentPORT)
+	agentAcknowledgeURL := fmt.Sprintf("http://%s:%s/agent/worker/registration/acknowledge", agentHOST, agentPORT)
 	registrarWorkerCreationURL := fmt.Sprintf("http://%s:%s/worker/create", registrarHOST, registrarPORT)
 
 	err := waitForAgent(5*time.Second, 1*time.Minute, agentHOST, agentPORT)
@@ -620,7 +678,7 @@ func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) boo
 	// Call Agent to identify worker data
 	workerData, err := getWorkerRegistrationData(agentIdentifyURL)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to call Agent API: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		fmt.Printf(red.Sprintf("[%s] Failed to start Worker registration: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
 	}
 
@@ -644,45 +702,32 @@ func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) boo
 		return false
 	}
 
-	AIK, err := decodePublicKeyFromPEM(workerData.AIK)
+	AIKPublicKey, err := validateAIKPublicData(workerData.AIKNameData, workerData.AIKPublicArea)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to parse AIK from PEM: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return false
-	}
-
-	// Calculate AIK digest
-	aikDigest, err := calculateAIKDigest(AIK)
-	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to calculate AIK digest: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		fmt.Printf(red.Sprintf("[%s] Failed to validate received Worker AIK: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
 	}
 
 	// Generate ephemeral key
 	ephemeralKey, err := generateEphemeralKey(32)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to generate ephemeral key: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		fmt.Printf(red.Sprintf("[%s] Failed to generate challenge ephemeral key: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
 	}
 
-	nonce, err := generateNonce(8)
-	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to generate challenge nonce: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
-		return false
-	}
+	// Some TPM cannot process secrets > 32 bytes, so first 8 bytes of the ephemeral key are used as nonce of quote computation
+	quoteNonce := hex.EncodeToString(ephemeralKey[:8])
 
-	// Construct worker challenge payload
-	challengePayload := fmt.Sprintf("%s::%s::%s", aikDigest, base64.StdEncoding.EncodeToString(ephemeralKey), nonce)
-
-	// Encrypt the WorkerChallengePayload with the EK public key
-	encryptedChallenge, err := encryptWithEK(EK, []byte(challengePayload))
+	encodedCredentialBlob, encodedEncryptedSecret, err := generateCredentialActivation(workerData.AIKNameData, EK, ephemeralKey)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to encrypt challengePayload with EK: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		fmt.Printf(red.Sprintf("[%s] Failed to generate AIK credential activation challenge: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
 	}
 
 	// Prepare challenge payload for sending
 	workerChallenge := WorkerChallenge{
-		WorkerChallenge: encryptedChallenge,
+		AIKCredential:      encodedCredentialBlob,
+		AIKEncryptedSecret: encodedEncryptedSecret,
 	}
 
 	// Send challenge request to the agent
@@ -704,7 +749,7 @@ func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) boo
 		return false
 	}
 
-	bootAggregate, hashAlg, err := validateWorkerQuote(challengeResponse.WorkerBootQuote, nonce, AIK)
+	bootAggregate, hashAlg, err := validateWorkerQuote(challengeResponse.WorkerBootQuote, quoteNonce, AIKPublicKey)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate Worker Quote: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
@@ -722,16 +767,38 @@ func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) boo
 		return false
 	}
 
+	AIKPublicKeyPEM := encodePublicKeyToPEM(AIKPublicKey)
+	if AIKPublicKeyPEM == "" {
+		fmt.Printf(red.Sprintf("[%s] Failed to parse AIK Public Key to PEM format\n", time.Now().Format("02-01-2006 15:04:05"), err))
+		return false
+	}
+
 	workerNode := WorkerNode{
 		WorkerId: workerData.UUID,
 		Name:     newWorker.GetName(),
-		AIK:      workerData.AIK,
+		AIK:      AIKPublicKeyPEM,
 	}
 
 	// Create a new worker
 	createWorkerResponse, err := createWorker(registrarWorkerCreationURL, &workerNode)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to create Worker Node: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
+	}
+
+	registrationAcknowledge := RegistrationAcknowledge{
+		Message: createWorkerResponse.Message,
+		Status:  createWorkerResponse.Status,
+	}
+
+	if createWorkerResponse.Status != "success" {
+		registrationAcknowledge.VerifierPublicKey = ""
+	} else {
+		registrationAcknowledge.VerifierPublicKey = verifierPublicKey
+	}
+
+	err = workerRegistrationAcknowledge(agentAcknowledgeURL, registrationAcknowledge)
+	if err != nil {
+		fmt.Printf(red.Sprintf("[%s] Failed to acknowledge Worker Node about registration result: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return false
 	}
 
@@ -767,7 +834,6 @@ func verifyEKCertificate(EKCertcheckRequest VerifyTPMEKCertificateRequest) error
 		return fmt.Errorf("Registrar failed to validate EK Certificate: %s (status: %d)", string(body), resp.StatusCode)
 	}
 	return nil
-
 }
 
 func verifyBootAggregate(checkRequest WorkerWhitelistCheckRequest) error {
@@ -823,6 +889,35 @@ func getWorkerRegistrationData(url string) (*WorkerResponse, error) {
 		return nil, fmt.Errorf("failed to decode response: received %s: %v", string(body), err)
 	}
 	return &workerResponse, nil
+}
+
+// Helper function to call the agent identification API
+func workerRegistrationAcknowledge(url string, acknowledge RegistrationAcknowledge) error {
+	// Marshal the attestation request to JSON
+	jsonPayload, err := json.Marshal(acknowledge)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Registration cknowledge request: %v", err)
+	}
+
+	// Make the POST request to the agent
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to send Registration acknowledge request: %v", err)
+	}
+
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	// Check if the status is OK (200) or created (201)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Agent failed to acknowledge registration: %s (status: %d)", string(body), resp.StatusCode)
+	}
+	return nil
 }
 
 func verifySignature(rsaPubKey *rsa.PublicKey, message []byte, signature tpmutil.U16Bytes) error {

@@ -15,6 +15,17 @@ import (
 	"time"
 )
 
+type ContainerRuntimeWhitelist struct {
+	ContainerRuntimeName string              `json:"containerRuntimeName" bson:"containerRuntimeName"`
+	ValidDigests         map[string][]string `json:"validDigests" bson:"validDigests"` // Hash algorithm as the key
+}
+
+type ContainerRuntimeCheckRequest struct {
+	ContainerRuntimeName string `json:"containerRuntimeName" bson:"containerRuntimeName"`
+	Digest               string `json:"digest" bson:"digest"`
+	HashAlg              string `json:"hashAlg"` // Include the hash algorithm in the request
+}
+
 // OsWhitelist represents the structure of our stored document in MongoDB.
 // It categorizes valid digests by hash algorithm.
 type OsWhitelist struct {
@@ -58,10 +69,11 @@ var (
 	green  *color.Color
 	yellow *color.Color
 
-	workerWhitelist *mongo.Collection
-	podWhitelist    *mongo.Collection
-	whitelistPORT   string
-	whitelistURI    string
+	workerWhitelist           *mongo.Collection
+	podWhitelist              *mongo.Collection
+	containerRuntimeWhitelist *mongo.Collection
+	whitelistPORT             string
+	whitelistURI              string
 )
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
@@ -208,6 +220,114 @@ func initializeMongoDB() {
 	// Access the database and workerWhitelist collection
 	workerWhitelist = client.Database("whitelists").Collection("worker_whitelist")
 	podWhitelist = client.Database("whitelists").Collection("pod_whitelist")
+	containerRuntimeWhitelist = client.Database("whitelists").Collection("container_runtime_whitelist")
+	return
+}
+
+// appendToContainerRuntimeWhitelist handles the addition of a new valid ContainerRuntimeWhitelist.
+func appendToContainerRuntimeWhitelist(c *gin.Context) {
+	var newContainerRuntimeWhitelist ContainerRuntimeWhitelist
+
+	// Bind JSON input to the OsWhitelist struct
+	if err := c.ShouldBindJSON(&newContainerRuntimeWhitelist); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid request body"})
+		return
+	}
+
+	// Check if the Container Runtime already exists in the Container Runtime whitelist
+	var existingContainerRuntimeWhitelist ContainerRuntimeWhitelist
+	err := containerRuntimeWhitelist.FindOne(context.TODO(), bson.M{"containerRuntimeName": newContainerRuntimeWhitelist.ContainerRuntimeName}).Decode(&existingContainerRuntimeWhitelist)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to query Container Runtime whitelist"})
+		return
+	}
+
+	if existingContainerRuntimeWhitelist.ContainerRuntimeName == newContainerRuntimeWhitelist.ContainerRuntimeName {
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "message": "Container Runtime whitelist already exists"})
+		return
+	}
+
+	// Insert the new OS whitelist
+	_, err = containerRuntimeWhitelist.InsertOne(context.TODO(), newContainerRuntimeWhitelist)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to append new valid Container Runtime list to Container Runtime whitelist"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Container Runtime whitelist added successfully"})
+	return
+}
+
+// checkContainerRuntimeWhitelist verifies if a given Container Runtime and digest match the stored Container Runtime whitelist.
+func checkContainerRuntimeWhitelist(c *gin.Context) {
+	var checkRequest ContainerRuntimeCheckRequest
+	if err := c.ShouldBindJSON(&checkRequest); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid request body"})
+		return
+	}
+
+	// Query MongoDB for the document matching the requested OS name
+	var containerRuntimeWhitelist ContainerRuntimeWhitelist
+	err := workerWhitelist.FindOne(context.TODO(), bson.M{"ContainerRuntimeName": checkRequest.ContainerRuntimeName}).Decode(&containerRuntimeWhitelist)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Container Runtime whitelist not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to query Container Runtime whitelist"})
+		}
+		return
+	}
+
+	// Check if the digest matches within the specified hash algorithm category
+	digests, exists := containerRuntimeWhitelist.ValidDigests[checkRequest.HashAlg]
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "No digests found for the specified hash algorithm"})
+		return
+	}
+
+	for _, hash := range digests {
+		if hash == checkRequest.Digest {
+			c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Container Runtime digest matches the stored whitelist"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Container Runtime digest does not match the stored whitelist"})
+	return
+}
+
+// deleteFromContainerRuntimeWhitelist deletes a worker whitelist record based on the provided containerRuntimeName.
+func deleteFromContainerRuntimeWhitelist(c *gin.Context) {
+	containerRuntimeName, err := url.QueryUnescape(c.Query("containerRuntimeName"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid containerRuntimeName"})
+		return
+	}
+	// Attempt to delete the document with the matching OSName
+	result, err := containerRuntimeWhitelist.DeleteOne(context.TODO(), bson.M{"containerRuntimeName": containerRuntimeName})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to delete the Container Runtime whitelist record"})
+		return
+	}
+
+	// Check if any document was deleted
+	if result.DeletedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Container Runtime whitelist record not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Container Runtime whitelist record deleted successfully"})
+}
+
+// dropContainerRuntimeWhitelist drops the containerRuntimeWhitelist collection from the MongoDB database.
+func dropContainerRuntimeWhitelist(c *gin.Context) {
+	// Drop the workerWhitelist collection
+	err := containerRuntimeWhitelist.Drop(context.TODO())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to drop Container Runtime whitelist"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Container Runtime whitelist dropped successfully"})
 	return
 }
 
@@ -422,6 +542,12 @@ func main() {
 	r.POST("/whitelist/pod/image/file/add", appendFilesToExistingImageWhitelistByImageName)
 	r.DELETE("/whitelist/pod/image/file/delete", deleteFileOfImageFromPodWhitelist)
 	r.DELETE("/whitelist/pod/drop", dropPodWhitelist)
+
+	// Container Runtime whitelist
+	r.POST("/whitelist/container/runtime/check", checkContainerRuntimeWhitelist)
+	r.POST("/whitelist/container/runtime/add", appendToContainerRuntimeWhitelist)
+	r.DELETE("/whitelist/worker/runtime/delete", deleteFromContainerRuntimeWhitelist)
+	r.DELETE("/whitelist/worker/drop", dropContainerRuntimeWhitelist)
 
 	// Start the server
 	if err := r.Run(":" + whitelistPORT); err != nil {

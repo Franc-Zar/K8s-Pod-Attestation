@@ -16,6 +16,14 @@ store_worker_data = {
     }
 }
 
+store_container_runtime_data = {
+    "containerRuntimeName": "/usr/bin/containerd-shim-runc-v2",
+    "validDigests": {
+        "SHA1": [],
+        "SHA256": ["ce9f5c5940530c40e47218af3405107b9acc0465b8c193492bd6a00db16991"]
+    }
+}
+
 # Test data for checking a worker whitelist
 check_worker_data = {
     "osName": "Debian GNU/Linux 12 (bookworm)",
@@ -165,9 +173,6 @@ store_pod_data = {
     ]
 }
 
-'''
-[{"filePath":"/usr/lib/x86_64-linux-gnu/libc.so.6","fileHash":"88024463c275711c29f6ac2920a5d3174349d8802720e2df1656637c18d8efba"},{"filePath":"/usr/bin/id","fileHash":"a3d987dd3f9ec0610dc13b7fdccef84895628065434f44247a65ef0d2a341b3c"},{"filePath":"/usr/lib/x86_64-linux-gnu/libselinux.so.1","fileHash":"0207e4908ea384e186c75925b0e56996a3eccecd48c99252aeb757d0d3451c93"},{"filePath":"/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2","fileHash":"19c626251526131ac9340826c8f7bcb693c6ceb9d5da55919c3aa45d972b704f"},{"filePath":"/usr/bin/find","fileHash":"c703b94ad3448bccc79cda80520964c8d371918a39eecc27f8d60f4e8891770a"},{"filePath":"/usr/local/bin/docker-entrypoint.sh","fileHash":"c211bc06cdc6bd3fa4752394767359159cbdbdfe1c2c7f445e600419e4c52091"},{"filePath":"/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2","fileHash":"6d8337d3d1648ed3f42eccdc90044505bd19b042c496d05c4c4cd3dfdddd9b24"},{"filePath":"/usr/lib/x86_64-linux-gnu/libssl.so.3","fileHash":"4d351715e334aa32eebeb2f03f376e5c961a47f73b37f36885c281ce6e24bb57"},{"filePath":"/usr/bin/dash","fileHash":"f5adb8bf0100ed0f8c7782ca5f92814e9229525a4b4e0d401cf3bea09ac960a6"},{"filePath":"/usr/local/bin/redis-server","fileHash":"6a4bf24ed035ca81c3b339d67953d942261af2156a01753601c5b05c30f0b72c"},{"filePath":"/usr/lib/x86_64-linux-gnu/libm.so.6","fileHash":"958fd4988943ab6713d04d4c7de8e468e358c5671db2acf9a7b025b465d10910"},{"filePath":"/usr/local/bin/gosu","fileHash":"bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3"},{"filePath":"/pause","fileHash":"11ef55f97205c88f7e1f680ce02eb581534d2ef654b823089ac258db56ca04d2"},{"filePath":"/usr/lib/x86_64-linux-gnu/libcrypto.so.3","fileHash":"4d13ab2d0a566eaeefbd493fffc3eca25fad9be4136c2796958906fa9c63d0f2"}]
-'''
 
 
 # Test data for checking a pod whitelist
@@ -186,6 +191,9 @@ check_pod_data = {
     "hashAlg": "SHA256"
 }
 
+def append_container_runtime_whitelist():
+    response = requests.post(f"{BASE_URL}/whitelist/container/runtime/add", headers=headers, data=json.dumps(store_container_runtime_data))
+    print("Add Container Runtime Response:", response.status_code, response.json())
 
 # Test function for adding a worker whitelist
 def append_worker_whitelist():
@@ -222,6 +230,7 @@ def delete_file_from_pod_whitelist(image_name, file_path):
 
 # Running the tests
 if __name__ == "__main__":
+    append_container_runtime_whitelist()
     append_worker_whitelist()      # Test adding worker whitelist
     #check_worker_whitelist()    # Test checking worker whitelist
     #delete_os_from_worker_whitelist("Ubuntu 22.04.6 LTS")
