@@ -6,8 +6,8 @@ import requests
 import rsa
 
 # Define API endpoints
-REGISTRAR_BASE_URL = 'http://localhost:8080'  # Ensure this matches your pod-handler URL
-POD_HANDLER_BASE_URL = 'http://localhost:8081'
+REGISTRAR_BASE_URL = 'http://localhost:30000'  # Ensure this matches your pod-handler URL
+POD_HANDLER_BASE_URL = 'http://localhost:30002'
 CREATE_TENANT_URL = f'{REGISTRAR_BASE_URL}/tenant/create'
 VERIFY_SIGNATURE_URL = f'{REGISTRAR_BASE_URL}/tenant/verify'
 POD_DEPLOYMENT_URL = f'{POD_HANDLER_BASE_URL}/pod/deploy'
@@ -79,7 +79,7 @@ metadata:
   labels:
     app: redis
 spec:
-  nodeName: worker1  # Specify the node where you want to deploy the pod
+  nodeName: worker  # Specify the node where you want to deploy the pod
   containers:
   - name: redis
     image: redis:latest
