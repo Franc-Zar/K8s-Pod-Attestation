@@ -1,7 +1,7 @@
 import base64
 import json
 import random
-
+import time
 import requests
 import rsa
 
@@ -75,6 +75,7 @@ message = '''
 apiVersion: v1
 kind: Pod
 metadata:
+  namespace: default
   name: redis-pod
   labels:
     app: redis
@@ -99,5 +100,7 @@ signature = sign_message(message)
 verify_signature(tenant_name, message, signature)
 
 signature = sign_message(pod_name)
+
+time.sleep(5)
 
 pod_attestation(tenant_name, pod_name, signature)
