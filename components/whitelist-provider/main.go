@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -153,14 +154,14 @@ func checkWorkerWhitelist(c *gin.Context) {
 	}
 
 	// Check if the digest matches within the specified hash algorithm category
-	digests, exists := osWhitelist.ValidDigests[checkRequest.HashAlg]
+	digests, exists := osWhitelist.ValidDigests[strings.ToLower(checkRequest.HashAlg)]
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "No digests found for the specified hash algorithm"})
 		return
 	}
 
-	for _, hash := range digests {
-		if hash == checkRequest.BootAggregate {
+	for _, digest := range digests {
+		if strings.EqualFold(digest, checkRequest.BootAggregate) {
 			c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Boot Aggregate matches the stored whitelist"})
 			return
 		}
@@ -267,8 +268,8 @@ func checkContainerRuntimeWhitelist(c *gin.Context) {
 	}
 
 	// Query MongoDB for the document matching the requested OS name
-	var containerRuntimeWhitelist ContainerRuntimeWhitelist
-	err := workerWhitelist.FindOne(context.TODO(), bson.M{"ContainerRuntimeName": checkRequest.ContainerRuntimeName}).Decode(&containerRuntimeWhitelist)
+	var existingContainerRuntimeWhitelist ContainerRuntimeWhitelist
+	err := containerRuntimeWhitelist.FindOne(context.TODO(), bson.M{"containerRuntimeName": checkRequest.ContainerRuntimeName}).Decode(&existingContainerRuntimeWhitelist)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Container Runtime whitelist not found"})
@@ -279,14 +280,14 @@ func checkContainerRuntimeWhitelist(c *gin.Context) {
 	}
 
 	// Check if the digest matches within the specified hash algorithm category
-	digests, exists := containerRuntimeWhitelist.ValidDigests[checkRequest.HashAlg]
+	digests, exists := existingContainerRuntimeWhitelist.ValidDigests[strings.ToLower(checkRequest.HashAlg)]
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "No digests found for the specified hash algorithm"})
 		return
 	}
 
-	for _, hash := range digests {
-		if hash == checkRequest.Digest {
+	for _, digest := range digests {
+		if strings.EqualFold(digest, checkRequest.Digest) {
 			c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Container Runtime digest matches the stored whitelist"})
 			return
 		}
@@ -437,7 +438,7 @@ func checkPodWhitelist(c *gin.Context) {
 		for _, validFile := range imageWhitelist.ValidFiles {
 			// Check if the file paths match
 			if podFile.FilePath == validFile.FilePath {
-				digests, exists := validFile.ValidDigests[checkRequest.HashAlg]
+				digests, exists := validFile.ValidDigests[strings.ToLower(checkRequest.HashAlg)]
 				if !exists {
 					c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "No digests found for the specified hash algorithm"})
 					return
@@ -445,7 +446,7 @@ func checkPodWhitelist(c *gin.Context) {
 
 				// Check if the file hash matches any of the valid digests
 				for _, digest := range digests {
-					if digest == podFile.FileHash {
+					if strings.EqualFold(digest, podFile.FileHash) {
 						found = true
 						break
 					}
@@ -546,8 +547,8 @@ func main() {
 	// Container Runtime whitelist
 	r.POST("/whitelist/container/runtime/check", checkContainerRuntimeWhitelist)
 	r.POST("/whitelist/container/runtime/add", appendToContainerRuntimeWhitelist)
-	r.DELETE("/whitelist/worker/runtime/delete", deleteFromContainerRuntimeWhitelist)
-	r.DELETE("/whitelist/worker/drop", dropContainerRuntimeWhitelist)
+	r.DELETE("/whitelist/container/runtime/delete", deleteFromContainerRuntimeWhitelist)
+	r.DELETE("/whitelist/container/runtime/drop", dropContainerRuntimeWhitelist)
 
 	// Start the server
 	if err := r.Run(":" + whitelistPORT); err != nil {

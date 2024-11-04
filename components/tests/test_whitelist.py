@@ -11,16 +11,16 @@ headers = {'Content-Type': 'application/json'}
 store_worker_data = {
     "osName": "Debian GNU/Linux 12 (bookworm)",
     "validDigests": {
-        "SHA1": [],
-        "SHA256": ["7b6436b0c98f62380866d9432c2af0ee08ce16a171bda6951aecd95ee1307d61"]
+        "sha1": [],
+        "sha256": ["7b6436b0c98f62380866d9432c2af0ee08ce16a171bda6951aecd95ee1307d61"]
     }
 }
 
 store_container_runtime_data = {
     "containerRuntimeName": "/usr/bin/containerd-shim-runc-v2",
     "validDigests": {
-        "SHA1": [],
-        "SHA256": ["ce9f5c5940530c40e47218af3405107b9acc0465b8c193492bd6a00db16991"]
+        "sha1": [],
+        "sha256": ["ce9f5c5940530c40e47218af3405107b9acc0465b8c193492bd6a00db16991ad"]
     }
 }
 
@@ -28,15 +28,15 @@ store_container_runtime_data = {
 check_worker_data = {
     "osName": "Debian GNU/Linux 12 (bookworm)",
     "bootAggregate": "7b6436b0c98f62380866d9432c2af0ee08ce16a171bda6951aecd95ee1307d61",
-    "hashAlg": "SHA256"
+    "hashalg": "sha256"
 }
 
 # Test data for appending new OS to the worker whitelist
 worker_data_to_append = {
     "osName": "Debian GNU/Linux 12 (bookworm)",
     "validDigests": {
-        "SHA1": [],
-        "SHA256": ["6341e6b2646a79a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af2"]
+        "sha1": [],
+        "sha256": ["6341e6b2646a79a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af2"]
     }
 }
 
@@ -47,8 +47,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "88024463c275711c29f6ac2920a5d3174349d8802720e2df1656637c18d8efba"
                 ]
             }
@@ -56,8 +56,8 @@ store_pod_data = {
         {
             "filePath": "/usr/bin/id",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "a3d987dd3f9ec0610dc13b7fdccef84895628065434f44247a65ef0d2a341b3c"
                 ]
             }
@@ -65,8 +65,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "0207e4908ea384e186c75925b0e56996a3eccecd48c99252aeb757d0d3451c93"
                 ]
             }
@@ -74,8 +74,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "19c626251526131ac9340826c8f7bcb693c6ceb9d5da55919c3aa45d972b704f"
                 ]
             }
@@ -83,8 +83,8 @@ store_pod_data = {
         {
             "filePath": "/usr/bin/find",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "c703b94ad3448bccc79cda80520964c8d371918a39eecc27f8d60f4e8891770a"
                 ]
             }
@@ -92,8 +92,8 @@ store_pod_data = {
         {
             "filePath": "/usr/local/bin/docker-entrypoint.sh",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "c211bc06cdc6bd3fa4752394767359159cbdbdfe1c2c7f445e600419e4c52091"
                 ]
             }
@@ -101,8 +101,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "6d8337d3d1648ed3f42eccdc90044505bd19b042c496d05c4c4cd3dfdddd9b24"
                 ]
             }
@@ -110,8 +110,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libssl.so.3",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "4d351715e334aa32eebeb2f03f376e5c961a47f73b37f36885c281ce6e24bb57"
                 ]
             }
@@ -119,8 +119,8 @@ store_pod_data = {
         {
             "filePath": "/usr/bin/dash",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "f5adb8bf0100ed0f8c7782ca5f92814e9229525a4b4e0d401cf3bea09ac960a6"
                 ]
             }
@@ -128,8 +128,8 @@ store_pod_data = {
         {
             "filePath": "/usr/local/bin/redis-server",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "6a4bf24ed035ca81c3b339d67953d942261af2156a01753601c5b05c30f0b72c"
                 ]
             }
@@ -137,8 +137,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libm.so.6",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "958fd4988943ab6713d04d4c7de8e468e358c5671db2acf9a7b025b465d10910"
                 ]
             }
@@ -146,8 +146,8 @@ store_pod_data = {
         {
             "filePath": "/usr/local/bin/gosu",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3"
                 ]
             }
@@ -155,8 +155,8 @@ store_pod_data = {
         {
             "filePath": "/pause",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "11ef55f97205c88f7e1f680ce02eb581534d2ef654b823089ac258db56ca04d2"
                 ]
             }
@@ -164,8 +164,8 @@ store_pod_data = {
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
             "validDigests": {
-                "SHA1": [],
-                "SHA256": [
+                "sha1": [],
+                "sha256": [
                     "4d13ab2d0a566eaeefbd493fffc3eca25fad9be4136c2796958906fa9c63d0f2"
                 ]
             }
@@ -188,7 +188,7 @@ check_pod_data = {
             "fileHash": "b157a79031e1c40f85931829bc5fc452"
         }
     ],
-    "hashAlg": "SHA256"
+    "hashalg": "sha256"
 }
 
 def append_container_runtime_whitelist():
