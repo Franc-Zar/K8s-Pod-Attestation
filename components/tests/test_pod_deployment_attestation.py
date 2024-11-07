@@ -7,7 +7,7 @@ import rsa
 
 # Define API endpoints
 REGISTRAR_BASE_URL = 'http://localhost:30000'  # Ensure this matches your pod-handler URL
-POD_HANDLER_BASE_URL = 'http://localhost:30002'
+POD_HANDLER_BASE_URL = 'http://localhost:30001'
 CREATE_TENANT_URL = f'{REGISTRAR_BASE_URL}/tenant/create'
 VERIFY_SIGNATURE_URL = f'{REGISTRAR_BASE_URL}/tenant/verify'
 POD_DEPLOYMENT_URL = f'{POD_HANDLER_BASE_URL}/pod/deploy'

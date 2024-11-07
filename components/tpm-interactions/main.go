@@ -606,6 +606,7 @@ func computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePa
 }
 
 func main() {
+	log.Printf(strings.ToLower("SHA256"))
 	rwc, err := simulator.GetWithFixedSeedInsecure(1073741825) //tpmutil.OpenTPM("/dev/tpm0")
 	if err != nil {
 		log.Fatalf("can't open TPM: %v", err)

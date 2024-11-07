@@ -16,15 +16,20 @@ import (
 	"time"
 )
 
+type ContainerDependencyWhitelist struct {
+	FilePath     string              `json:"filePath" bson:"filePath"`
+	ValidDigests map[string][]string `json:"validDigests" bson:"validDigests"` // Hash algorithm as the key
+}
+
 type ContainerRuntimeWhitelist struct {
-	ContainerRuntimeName string              `json:"containerRuntimeName" bson:"containerRuntimeName"`
-	ValidDigests         map[string][]string `json:"validDigests" bson:"validDigests"` // Hash algorithm as the key
+	ContainerRuntimeName string                         `json:"containerRuntimeName" bson:"containerRuntimeName"`
+	ValidFiles           []ContainerDependencyWhitelist `json:"validFiles" json:"validFiles"`
 }
 
 type ContainerRuntimeCheckRequest struct {
-	ContainerRuntimeName string `json:"containerRuntimeName" bson:"containerRuntimeName"`
-	Digest               string `json:"digest" bson:"digest"`
-	HashAlg              string `json:"hashAlg"` // Include the hash algorithm in the request
+	ContainerRuntimeName         string     `json:"containerRuntimeName"`
+	ContainerRuntimeDependencies []IMAEntry `json:"containerRuntimeDependencies"`
+	HashAlg                      string     `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 // OsWhitelist represents the structure of our stored document in MongoDB.
@@ -52,16 +57,16 @@ type ImageWhitelist struct {
 	ValidFiles  []PodFileWhitelist `json:"validFiles" json:"validFiles"`
 }
 
-type IMAPodEntry struct {
+type IMAEntry struct {
 	FilePath string `json:"filePath"`
 	FileHash string `json:"fileHash"`
 }
 
 type PodWhitelistCheckRequest struct {
-	PodImageName   string        `json:"podImageName"`
-	PodImageDigest string        `json:"podImageDigest"`
-	PodFiles       []IMAPodEntry `json:"podFiles"`
-	HashAlg        string        `json:"hashAlg"` // Include the hash algorithm in the request
+	PodImageName   string     `json:"podImageName"`
+	PodImageDigest string     `json:"podImageDigest"`
+	PodFiles       []IMAEntry `json:"podFiles"`
+	HashAlg        string     `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 // MongoDB client and global variables
@@ -161,7 +166,7 @@ func checkWorkerWhitelist(c *gin.Context) {
 	}
 
 	for _, digest := range digests {
-		if strings.EqualFold(digest, checkRequest.BootAggregate) {
+		if digest == checkRequest.BootAggregate {
 			c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Boot Aggregate matches the stored whitelist"})
 			return
 		}
@@ -267,7 +272,7 @@ func checkContainerRuntimeWhitelist(c *gin.Context) {
 		return
 	}
 
-	// Query MongoDB for the document matching the requested OS name
+	// Query MongoDB for the document matching the requested Container Runtime name
 	var existingContainerRuntimeWhitelist ContainerRuntimeWhitelist
 	err := containerRuntimeWhitelist.FindOne(context.TODO(), bson.M{"containerRuntimeName": checkRequest.ContainerRuntimeName}).Decode(&existingContainerRuntimeWhitelist)
 	if err != nil {
@@ -279,21 +284,39 @@ func checkContainerRuntimeWhitelist(c *gin.Context) {
 		return
 	}
 
-	// Check if the digest matches within the specified hash algorithm category
-	digests, exists := existingContainerRuntimeWhitelist.ValidDigests[strings.ToLower(checkRequest.HashAlg)]
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "No digests found for the specified hash algorithm"})
-		return
-	}
+	// Iterate through the pod files to check if they match the stored whitelist
+	for _, containerRuntimeDependency := range checkRequest.ContainerRuntimeDependencies {
+		found := false
+		for _, validFile := range existingContainerRuntimeWhitelist.ValidFiles {
+			// Check if the file paths match
+			if containerRuntimeDependency.FilePath == validFile.FilePath {
+				digests, exists := validFile.ValidDigests[strings.ToLower(checkRequest.HashAlg)]
+				if !exists {
+					c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "No digests found for the specified hash algorithm"})
+					return
+				}
 
-	for _, digest := range digests {
-		if strings.EqualFold(digest, checkRequest.Digest) {
-			c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Container Runtime digest matches the stored whitelist"})
+				// Check if the file hash matches any of the valid digests
+				for _, digest := range digests {
+					if digest == containerRuntimeDependency.FileHash {
+						found = true
+						break
+					}
+				}
+				if found {
+					break // Move on to the next container runtime dependency file once a match is found
+				}
+			}
+		}
+
+		// If no match is found for the current container dependency file
+		if !found {
+			c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "File hash does not match the stored whitelist"})
 			return
 		}
 	}
 
-	c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Container Runtime digest does not match the stored whitelist"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "All Container Runtime depdencency files match the stored whitelist"})
 	return
 }
 
@@ -446,7 +469,7 @@ func checkPodWhitelist(c *gin.Context) {
 
 				// Check if the file hash matches any of the valid digests
 				for _, digest := range digests {
-					if strings.EqualFold(digest, podFile.FileHash) {
+					if digest == podFile.FileHash {
 						found = true
 						break
 					}

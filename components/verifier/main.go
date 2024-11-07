@@ -83,22 +83,22 @@ type PCRSet struct {
 	PCRs map[string]string `json:"pcrs"`
 }
 
-type IMAPodEntry struct {
+type IMAEntry struct {
 	FilePath string `json:"filePath"`
 	FileHash string `json:"fileHash"`
 }
 
 type PodWhitelistCheckRequest struct {
-	PodImageName   string        `json:"podImageName"`
-	PodImageDigest string        `json:"podImageDigest"`
-	PodFiles       []IMAPodEntry `json:"podFiles"`
-	HashAlg        string        `json:"hashAlg"` // Include the hash algorithm in the request
+	PodImageName   string     `json:"podImageName"`
+	PodImageDigest string     `json:"podImageDigest"`
+	PodFiles       []IMAEntry `json:"podFiles"`
+	HashAlg        string     `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 type ContainerRuntimeCheckRequest struct {
-	ContainerRuntimeName string `json:"containerRuntimeName"`
-	Digest               string `json:"digest"`
-	HashAlg              string `json:"hashAlg"` // Include the hash algorithm in the request
+	ContainerRuntimeName         string     `json:"containerRuntimeName"`
+	ContainerRuntimeDependencies []IMAEntry `json:"containerRuntimeDependencies"`
+	HashAlg                      string     `json:"hashAlg"` // Include the hash algorithm in the request
 }
 
 type AttestationResult struct {
@@ -111,6 +111,8 @@ type AttestationResult struct {
 
 const COLON_BYTE = byte(58) // ASCII code for ":"
 const NULL_BYTE = byte(0)
+const containerRuntimeDependencies = "/usr/bin/containerd:/usr/bin/containerd:/usr/lib/systemd/systemd:swapper/0"
+const containerRuntimeName = "/usr/bin/containerd-shim-runc-v2"
 
 // Color variables for output
 var (
@@ -527,8 +529,8 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		}, fmt.Errorf("Error while validating Worker Quote")
 	}
 
-	IMAPodEntries, containerRuntimeCheckRequest, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCR10Digest, podUID)
-	if err != nil || containerRuntimeCheckRequest == nil {
+	IMAPodEntries, IMAContainerRuntimeEntries, err := IMAVerification(attestationResponse.Evidence.WorkerIMA, PCR10Digest, podUID)
+	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to validate IMA measurement log: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return &AttestationResult{
 			Agent:      agentName,
@@ -558,7 +560,13 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		HashAlg:        hashAlg,
 	}
 
-	err = verifyContainerRuntimeIntegrity(*containerRuntimeCheckRequest)
+	containerRuntimeCheckRequest := ContainerRuntimeCheckRequest{
+		ContainerRuntimeName:         containerRuntimeName,
+		ContainerRuntimeDependencies: IMAContainerRuntimeEntries,
+		HashAlg:                      hashAlg,
+	}
+
+	err = verifyContainerRuntimeIntegrity(containerRuntimeCheckRequest)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Failed to verify integrity of Container Runtime: %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), containerRuntimeCheckRequest.ContainerRuntimeName, err))
 		return &AttestationResult{
@@ -691,9 +699,8 @@ func extendIMAEntries(previousHash []byte, templateHash string) ([]byte, error) 
 }
 
 // IMAVerification checks the integrity of the IMA measurement log against the received Quote and returns the entries related to the pod being attested for statical analysis of executed software and the AttestationResult
-func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEntry, *ContainerRuntimeCheckRequest, error) {
+func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAEntry, []IMAEntry, error) {
 	isIMAValid := false
-	var containerRuntimeCheckRequest ContainerRuntimeCheckRequest
 
 	decodedLog, err := base64.StdEncoding.DecodeString(IMAMeasurementLog)
 	if err != nil {
@@ -704,7 +711,8 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 	if len(logLines) > 0 && logLines[len(logLines)-1] == "" {
 		logLines = logLines[:len(logLines)-1] // Remove the last empty line --> each entry adds a \n so last line will add an empty line
 	}
-	uniqueEntries := make(map[string]IMAPodEntry)
+	uniquePodEntries := make(map[string]IMAEntry)
+	uniqueContainerRuntimeEntries := make(map[string]IMAEntry)
 
 	// initial PCR configuration
 	previousHash := make([]byte, 32)
@@ -745,15 +753,24 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 			isIMAValid = true
 		}
 
-		// check if entry belongs to container or host, otherwise after having computed the extend hash, go to next entry in IMA ML
+		// check if entry belongs to container or is pure a host measurement, otherwise after having computed the extend hash, go to next entry in IMA ML
 		if !strings.Contains(depField, "containerd") {
 			continue
 		}
 
-		if filePathField == "/usr/bin/containerd-shim-runc-v2" {
-			containerRuntimeCheckRequest.ContainerRuntimeName = filePathField
-			containerRuntimeCheckRequest.Digest = fileHash
-			containerRuntimeCheckRequest.HashAlg = hashAlgo
+		// entry is host container-related not a pod entry
+		if filePathField == containerRuntimeName || depField == containerRuntimeDependencies {
+			// Create a unique key by combining filePath and fileHash
+			entryKey := fmt.Sprintf("%s:%s", filePathField, fileHash)
+
+			// Add the entry to the map if it doesn't exist
+			if _, exists := uniqueContainerRuntimeEntries[entryKey]; !exists {
+				uniqueContainerRuntimeEntries[entryKey] = IMAEntry{
+					FilePath: filePathField,
+					FileHash: fileHash,
+				}
+			}
+			continue
 		}
 
 		// Check if the cgroup path contains the podUID
@@ -763,8 +780,8 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 			entryKey := fmt.Sprintf("%s:%s", filePathField, fileHash)
 
 			// Add the entry to the map if it doesn't exist
-			if _, exists := uniqueEntries[entryKey]; !exists {
-				uniqueEntries[entryKey] = IMAPodEntry{
+			if _, exists := uniquePodEntries[entryKey]; !exists {
+				uniquePodEntries[entryKey] = IMAEntry{
 					FilePath: filePathField,
 					FileHash: fileHash,
 				}
@@ -780,13 +797,18 @@ func IMAVerification(IMAMeasurementLog, PCR10Digest, podUID string) ([]IMAPodEnt
 	}
 
 	// Convert the unique entries back to a slice
-	IMAPodEntries := make([]IMAPodEntry, 0, len(uniqueEntries))
-	for _, entry := range uniqueEntries {
+	IMAPodEntries := make([]IMAEntry, 0, len(uniquePodEntries))
+	for _, entry := range uniquePodEntries {
 		IMAPodEntries = append(IMAPodEntries, entry)
 	}
 
+	IMAContainerRuntimeEntries := make([]IMAEntry, 0, len(uniqueContainerRuntimeEntries))
+	for _, entry := range uniqueContainerRuntimeEntries {
+		IMAContainerRuntimeEntries = append(IMAContainerRuntimeEntries, entry)
+	}
+
 	// Return the collected IMA pod entries
-	return IMAPodEntries, &containerRuntimeCheckRequest, nil
+	return IMAPodEntries, IMAContainerRuntimeEntries, nil
 }
 
 func computeIMAEntryHashes(packedDep, packedCgroup, packedFileHash, packedFilePath []byte) (string, string) {

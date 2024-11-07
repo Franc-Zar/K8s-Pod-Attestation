@@ -18,11 +18,64 @@ store_worker_data = {
 
 store_container_runtime_data = {
     "containerRuntimeName": "/usr/bin/containerd-shim-runc-v2",
-    "validDigests": {
-        "sha1": [],
-        "sha256": ["ce9f5c5940530c40e47218af3405107b9acc0465b8c193492bd6a00db16991ad"]
-    }
+    "validFiles": [
+        {
+            "filePath": "/opt/cni/bin/calico",
+            "validDigests": {
+                "sha1": [],
+                "sha256": [
+                    "08eaf52719e5ef7862e9a959529f4588ac812f4b43ee1b2d42731bef50475304"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/bin/containerd-shim-runc-v2",
+            "validDigests": {
+                "sha1": [],
+                "sha256": [
+                    "ce9f5c5940530c40e47218af3405107b9acc0465b8c193492bd6a00db16991ad"
+                ]
+            }
+        },
+        {
+            "filePath": "/usr/bin/unpigz",
+            "validDigests": {
+                "sha1": [],
+                "sha256": [
+                    "ffdb0ad613a9d22b02816d1c67765f611c90fa98047b83917abe2c4677d0f4b3"
+                ]
+            }
+        },
+        {
+            "filePath": "/opt/cni/bin/loopback",
+            "validDigests": {
+                "sha1": [],
+                "sha256": [
+                    "d013c4492074744a6256a4db523e828e2134a105d5ca64282ddcb54308f7fd71"
+                ]
+            }
+        },
+        {
+            "filePath": "/opt/cni/bin/portmap",
+            "validDigests": {
+                "sha1": [],
+                "sha256": [
+                    "a3ca41bafc673c21ca1b1e89a596d47ecaedfd0f2bf8009d3a2b178356f9a7ad"
+                ]
+            }
+        },
+        {
+            "filePath": "/opt/cni/bin/bandwidth",
+            "validDigests": {
+                "sha1": [],
+                "sha256": [
+                    "edcd32e7e7f0714cf051ee7e869ebcbe8dc2cfc58829f5539f60de6ce12708c0"
+                ]
+            }
+        }
+    ]
 }
+
 
 # Test data for checking a worker whitelist
 check_worker_data = {
