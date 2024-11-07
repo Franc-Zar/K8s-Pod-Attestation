@@ -82,10 +82,16 @@ metadata:
 spec:
   nodeName: worker  # Specify the node where you want to deploy the pod
   containers:
-  - name: redis
+  - name: redis1
     image: redis:latest
+    command: ["redis-server", "--port", "6380"]  # Override the default port
     ports:
-    - containerPort: 6379
+    - containerPort: 6380
+  - name: redis2
+    image: redis:latest
+    command: ["redis-server", "--port", "6381"]  # Override the second Redis container's port
+    ports:
+    - containerPort: 6381
 '''
 
 pod_name = "redis-pod"
