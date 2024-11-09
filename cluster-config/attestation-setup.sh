@@ -11,6 +11,7 @@ COMMAND="$1"
 
 # List of YAML files to apply/delete
 YAML_FILES=(
+  "attestation-secrets.yaml"
   "cluster-status-controller.yaml"
   "pod-handler-service.yaml"
   "pod-watcher.yaml"
