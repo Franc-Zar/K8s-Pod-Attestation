@@ -127,7 +127,7 @@ var (
 	whitelistPORT                string
 	agentServicePortAllocation   int32 = 9090
 	agentNodePortAllocation      int32 = 31000
-	verifierPublicKey                  = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuoi/38EDObItiLd1Q8Cy\nXsPaHjOreYqVJYEO4NfCZR2H01LXrdj/LcpyrB1rKBc4UWI8lroSdhjMJxC62372\nWvDk9cD5k+iyPwdM+EggpiRfEmHWF3zob8junyWHW6JInf0+AGhbKgBfMXo9PvAn\nr5CVeqp2BrstdZtrWVRuQAKip9c7hl+mHODkE5yb0InHyRe5WWr5P7wtXtAPM6SO\n8dVk/QWXdsB9rsb+Ejy4LHSIUpHUOZO8LvGD1rVLO82H4EUXKBFeiOEJjly4HOkv\nmFe/c/Cma1pM+702X6ULf0/BIMJkWzD3INdLtk8FE8rIxrrMSnDtmWw9BgGdsDgk\npQIDAQAB\n-----END PUBLIC KEY-----\n"
+	verifierPublicKey            string
 )
 
 // initializeColors sets up color variables for console output.
@@ -144,6 +144,7 @@ func loadEnvironmentVariables() {
 	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
+	verifierPublicKey = getEnv("VERIFIER_PUBLIC_KEY", "")
 
 	// setting namespaces allowed for attestation: only pods deployed within them can be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)

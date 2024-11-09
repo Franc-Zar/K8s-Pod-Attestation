@@ -61,6 +61,11 @@ spec:
               value: "30000"
             - name: POD_HANDLER_PORT
               value: "8080"
+            - name: ATTESTATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: attestation-secrets
+                  key: attestation-secret-hmac              
           ports:
             - containerPort: 8080
           volumeMounts:

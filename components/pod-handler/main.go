@@ -62,7 +62,7 @@ var (
 	attestationNamespaces        string
 	attestationEnabledNamespaces []string
 	//attestation secret is shared between Pod Handler and Verifier to avoid issuance of unauthentic attestation requests
-	attestationSecret = []byte("this_is_a_32_byte_long_secret_k")
+	attestationSecret []byte
 )
 
 // loadEnvironmentVariables loads required environment variables and sets default values if necessary.
@@ -71,6 +71,7 @@ func loadEnvironmentVariables() {
 	registrarPORT = getEnv("REGISTRAR_PORT", "8080")
 	podHandlerPORT = getEnv("POD_HANDLER_PORT", "8081")
 	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
+	attestationSecret = []byte(getEnv("ATTESTATION_SECRET", ""))
 
 	// setting namespaces allowed for attestation: only pods deployed within them can be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)

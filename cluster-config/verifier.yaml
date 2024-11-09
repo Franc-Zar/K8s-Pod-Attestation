@@ -66,7 +66,17 @@ spec:
             - name: WHITELIST_HOST
               value: "192.168.0.103"
             - name: WHITELIST_PORT
-              value: "30002" 
+              value: "30002"
+            - name: VERIFIER_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: attestation-secrets
+                  key: verifier-private-key
+            - name: ATTESTATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: attestation-secrets
+                  key: attestation-secret-hmac             
           volumeMounts:
             - name: kube-config
               mountPath: /root/.kube

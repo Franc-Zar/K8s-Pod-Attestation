@@ -129,37 +129,9 @@ var (
 	attestationEnabledNamespaces []string
 	whitelistHOST                string
 	whitelistPORT                string
+	attestationSecret            []byte
+	verifierPrivateKey           string
 )
-
-// TEST PURPOSE
-var attestationSecret = []byte("this_is_a_32_byte_long_secret_k")
-var verifierKey = `-----BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEAuoi/38EDObItiLd1Q8CyXsPaHjOreYqVJYEO4NfCZR2H01LX
-rdj/LcpyrB1rKBc4UWI8lroSdhjMJxC62372WvDk9cD5k+iyPwdM+EggpiRfEmHW
-F3zob8junyWHW6JInf0+AGhbKgBfMXo9PvAnr5CVeqp2BrstdZtrWVRuQAKip9c7
-hl+mHODkE5yb0InHyRe5WWr5P7wtXtAPM6SO8dVk/QWXdsB9rsb+Ejy4LHSIUpHU
-OZO8LvGD1rVLO82H4EUXKBFeiOEJjly4HOkvmFe/c/Cma1pM+702X6ULf0/BIMJk
-WzD3INdLtk8FE8rIxrrMSnDtmWw9BgGdsDgkpQIDAQABAoIBAAU0UIopI/JlpsCU
-QcjQpQlg1IKYNXYQKEYiGiyqyGky0DnUq2DV15TK+7USow08zJz0rTUVXvN9kKCc
-ZmI+Yhg6dWDn7+6xBNweU4bv2D1acW6dXTBNk1yfEg1Nqj+jwPvrd2Hih3yeAwnp
-27CYWbsbwRfpjp50dXm9Cts0sFjHzdjPlxd28v6jWKjRMoyZuvVis7rE9Zp6y8Yl
-MCcHmCAJN/KdfMYHIHbNsjo8hmif//eQCUk4im8dP+5l3Mje4RbYZqSJ0GzhAkgE
-+vvQiSlNBObqDJ6pWE/x77VpWY0zf78IqBf8qEXX2LfHKychFmjeBWFZF5eUPGzb
-ST3lT3cCgYEA3ohK3BNDz5xFIg/rCPbKisGKB0Ll+bZZ/Wi6AWQltJ7HaG5AXtLV
-kIrFs1xFYEFTchuHLgZvfUMqhz/9PEHJRlsMxyXmZAwmzsmr2cQ6J9zmoWWc8sbx
-9i54Iab/veFT5UbS71+G9XNZxmkH60tYcpeqrtAZ/0Rj8ndvREUFY88CgYEA1pZ9
-5VtxLUsmCqeFI/6Zbbw1RB4flQBDI//AeAtQNZb6qwcdOvLBNLF1SDM8WIcJw1Kx
-NPgnTeFAS4f6L37J8wQQ+QDp83W8hGhAKeh3c48sxC6I+BNL/duV6Z7yT7XHFYdq
-bxUuELpskk4QTFpwTRb94TlPls4Fa6e+OiwMaUsCgYEAsJLw44Od0QSsjoSW+Lvq
-pwM/JNfeZ7Bb44nP3f67NICwtZqWFSeyMkkK6nES03fCYM6bCtgsavZ6rmsF42RH
-8z2X/AWEtGo3+OlpJRhhFPRhRDu+t51IrRDeXcWHNAGxckIqaaohCm4HFDqPABL/
-EZ5q3t9dYYHA1MoUTdV+m10CgYBfg77n/yrCQWfeaDBgFCxQ5uxCtLHUDbjU5jrS
-dB6wq9JJnDILkhAjlzWf/IZI1VqoIT+VVzuPc8q9k/nteB8F13KCk0CPSIGv4gNl
-Y/7/ZeREMn5vBY/WoA37Xe93QW8rCwp6BVBqy8AV4z9n7P19otVAkdT2SB+rio+m
-rwKbPwKBgEtGHcXZQbo6rmlJo7rToicPMzlQkxHiJA/VogXfEhxLioj12hk7i6jQ
-rvFXR5gyK4gO/QkPQuk3vON5l+JLNb1atPnUSPm4jSubHnVLcoKRb8KhrHQLflIQ
-QjuOz08OOiJlQjBjWTMHUXfccFV3Bu6BOsFAr44Cspwd3bD3QUV6
------END RSA PRIVATE KEY-----`
 
 // watchAttestationRequestCRDChanges starts watching for changes to the AttestationRequest CRD
 // and processes added, modified, and deleted events.
@@ -231,6 +203,8 @@ func loadEnvironmentVariables() {
 	attestationNamespaces = getEnv("ATTESTATION_NAMESPACES", "[\"default\"]")
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
+	verifierPrivateKey = getEnv("VERIFIER_PRIVATE_KEY", "")
+	attestationSecret = []byte(getEnv("ATTESTATION_SECRET", ""))
 	// setting namespaces allowed for attestation: only pods deployed within them can be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
 	if err != nil {
@@ -471,7 +445,7 @@ func podAttestation(obj interface{}) (*AttestationResult, error) {
 		return nil, fmt.Errorf("Error while serializing Attestation Request")
 	}
 
-	attestationRequestSignature, err := signMessage(verifierKey, attestationRequestJSON)
+	attestationRequestSignature, err := signMessage(verifierPrivateKey, attestationRequestJSON)
 	if err != nil {
 		fmt.Printf(red.Sprintf("[%s] Error signing Attestation Request\n", time.Now().Format("02-01-2006 15:04:05")))
 		return nil, fmt.Errorf("Error while signing Attestation Request")
