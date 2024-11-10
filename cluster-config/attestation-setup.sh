@@ -22,11 +22,6 @@ if [ "$COMMAND" == "apply" ]; then
   else
     echo "Namespace '$NAMESPACE' already exists."
   fi
-elif [ "$COMMAND" == "delete" ]; then
-  echo "Deleting namespace '$NAMESPACE'..."
-  kubectl delete namespace "$NAMESPACE" --ignore-not-found=true
-  echo "Namespace '$NAMESPACE' deletion attempted."
-fi
 
 # List of YAML files to apply/delete
 YAML_FILES=(
@@ -52,6 +47,12 @@ if [ "$COMMAND" == "apply" ] || [ "$COMMAND" == "delete" ]; then
 else
   echo "Invalid command. Use 'apply' or 'delete'."
   exit 1
+fi
+
+if [ "$COMMAND" == "delete" ]; then
+  echo "Deleting namespace '$NAMESPACE'..."
+  kubectl delete namespace "$NAMESPACE" --ignore-not-found=true
+  echo "Namespace '$NAMESPACE' deletion attempted."
 fi
 
 echo "Operation '$COMMAND' completed successfully."
