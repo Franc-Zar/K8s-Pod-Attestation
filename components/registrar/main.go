@@ -550,6 +550,35 @@ func getTenantIdByName(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tenantId": tenant.TenantID, "status": "success"})
 }
 
+// remove a Tenant from the database
+func deleteTenant(workerName string) error {
+	query := "DELETE FROM tenants WHERE name = ?"
+	_, err := db.Exec(query, workerName)
+	return err
+}
+
+// deleteTenantByName handles the deletion of a Tenant by its name
+func deleteTenantByName(c *gin.Context) {
+	tenantName := c.Query("name")
+	if tenantName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tenant name is required"})
+		return
+	}
+
+	// Lock access to prevent race conditions
+	mtx.Lock()
+	defer mtx.Unlock()
+
+	// Call a function to delete the worker from your data store or Kubernetes
+	err := deleteTenant(tenantName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Tenant deleted successfully"})
+}
+
 // Worker functions
 // ---------------------------------------------------------------------------------------------------------------------------------
 
@@ -838,9 +867,10 @@ func main() {
 	r := gin.Default()
 
 	// Define routes for the Tenant API
-	r.POST("/tenant/create", createTenant)          // POST create tenant
-	r.POST("/tenant/verify", verifyTenantSignature) // POST verify tenant signature
-	r.GET("/tenant/getIdByName", getTenantIdByName) // GET tenant ID by name
+	r.POST("/tenant/create", createTenant)               // POST create tenant
+	r.POST("/tenant/verify", verifyTenantSignature)      // POST verify tenant signature
+	r.GET("/tenant/getIdByName", getTenantIdByName)      // GET tenant ID by name
+	r.DELETE("/tenant/deleteByName", deleteTenantByName) // DELETE tenant by name
 
 	r.POST("/worker/create", createWorker)                           // POST create worker
 	r.POST("/worker/verify", verifyWorkerSignature)                  // POST verify worker signature

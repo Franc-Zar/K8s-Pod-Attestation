@@ -399,8 +399,6 @@ func handleNodeEvent(event watch.Event, node *corev1.Node) {
 			fmt.Printf(green.Sprintf("[%s] Worker node '%s' joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 
 			isAgentDeployed, agentHOST, agentPORT := deployAgent(node)
-			log.Printf("FOUND AGENT IP: %s", agentHOST)
-			log.Printf("AGENT PORT: %s", agentPORT)
 			if !isAgentDeployed || !createAgentCRDInstance(node.Name) || !workerRegistration(node, agentHOST, agentPORT) {
 				err := deleteNodeFromCluster(node.Name)
 				if err != nil {

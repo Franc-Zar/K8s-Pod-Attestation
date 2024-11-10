@@ -9,6 +9,29 @@ fi
 # Get the command based on the flag passed
 COMMAND="$1"
 
+# Define the namespace
+NAMESPACE="attestation-system"
+
+# Create or delete the namespace based on the command
+if [ "$COMMAND" == "apply" ]; then
+  echo "Ensuring namespace '$NAMESPACE' exists..."
+  kubectl get namespace "$NAMESPACE" > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    kubectl create namespace "$NAMESPACE"
+    if [ $? -ne 0 ]; then
+      echo "Failed to create namespace '$NAMESPACE'. Exiting."
+      exit 1
+    fi
+  fi
+elif [ "$COMMAND" == "delete" ]; then
+  echo "Deleting namespace '$NAMESPACE'..."
+  kubectl delete namespace "$NAMESPACE" --ignore-not-found=true
+  if [ $? -ne 0 ]; then
+    echo "Failed to delete namespace '$NAMESPACE'. Exiting."
+    exit 1
+  fi
+fi
+
 # List of YAML files to apply/delete
 YAML_FILES=(
   "attestation-secrets.yaml"
@@ -25,7 +48,7 @@ YAML_FILES=(
 if [ "$COMMAND" == "apply" ] || [ "$COMMAND" == "delete" ]; then
   for file in "${YAML_FILES[@]}"; do
     echo "Running: kubectl $COMMAND -f $file"
-    kubectl $COMMAND -f "$file"
+    kubectl $COMMAND -f "$file" -n "$NAMESPACE"
     if [ $? -ne 0 ]; then
       echo "Error applying/deleting $file"
       exit 1
