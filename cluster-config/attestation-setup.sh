@@ -39,8 +39,8 @@ YAML_FILES=(
 # Apply or delete resources in the specified namespace
 if [ "$COMMAND" == "apply" ] || [ "$COMMAND" == "delete" ]; then
   for file in "${YAML_FILES[@]}"; do
-    echo "Running: kubectl $COMMAND -f $file -n $NAMESPACE"
-    kubectl $COMMAND -f "$file" -n "$NAMESPACE"
+    echo "Running: kubectl $COMMAND -f $file"
+    kubectl $COMMAND -f "$file"
     if [ $? -ne 0 ]; then
       echo "Error applying/deleting $file"
     fi
