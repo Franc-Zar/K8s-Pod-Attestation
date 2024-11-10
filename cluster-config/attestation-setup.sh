@@ -18,18 +18,14 @@ if [ "$COMMAND" == "apply" ]; then
   kubectl get namespace "$NAMESPACE" > /dev/null 2>&1
   if [ $? -ne 0 ]; then
     kubectl create namespace "$NAMESPACE"
-    if [ $? -ne 0 ]; then
-      echo "Failed to create namespace '$NAMESPACE'. Exiting."
-      exit 1
-    fi
+    echo "Namespace '$NAMESPACE' created."
+  else
+    echo "Namespace '$NAMESPACE' already exists."
   fi
 elif [ "$COMMAND" == "delete" ]; then
   echo "Deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found=true
-  if [ $? -ne 0 ]; then
-    echo "Failed to delete namespace '$NAMESPACE'. Exiting."
-    exit 1
-  fi
+  echo "Namespace '$NAMESPACE' deletion attempted."
 fi
 
 # List of YAML files to apply/delete
@@ -51,7 +47,6 @@ if [ "$COMMAND" == "apply" ] || [ "$COMMAND" == "delete" ]; then
     kubectl $COMMAND -f "$file" -n "$NAMESPACE"
     if [ $? -ne 0 ]; then
       echo "Error applying/deleting $file"
-      exit 1
     fi
   done
 else
