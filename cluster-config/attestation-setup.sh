@@ -12,7 +12,7 @@ COMMAND="$1"
 # Define the namespace
 NAMESPACE="attestation-system"
 
-# Create or delete the namespace based on the command
+# Create the namespace if the command is "apply"
 if [ "$COMMAND" == "apply" ]; then
   echo "Ensuring namespace '$NAMESPACE' exists..."
   kubectl get namespace "$NAMESPACE" > /dev/null 2>&1
@@ -22,6 +22,7 @@ if [ "$COMMAND" == "apply" ]; then
   else
     echo "Namespace '$NAMESPACE' already exists."
   fi
+fi
 
 # List of YAML files to apply/delete
 YAML_FILES=(
@@ -35,10 +36,10 @@ YAML_FILES=(
   "worker-handler.yaml"
 )
 
-# Check if the command is valid
+# Apply or delete resources in the specified namespace
 if [ "$COMMAND" == "apply" ] || [ "$COMMAND" == "delete" ]; then
   for file in "${YAML_FILES[@]}"; do
-    echo "Running: kubectl $COMMAND -f $file"
+    echo "Running: kubectl $COMMAND -f $file -n $NAMESPACE"
     kubectl $COMMAND -f "$file" -n "$NAMESPACE"
     if [ $? -ne 0 ]; then
       echo "Error applying/deleting $file"
@@ -49,6 +50,7 @@ else
   exit 1
 fi
 
+# Delete the namespace if the command is "delete"
 if [ "$COMMAND" == "delete" ]; then
   echo "Deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found=true
