@@ -85,9 +85,10 @@ for i in range(0, 50):
         ports:
         - containerPort: 6381
     '''
+    to_sign = message
 
     # Sign the YAML content (message)
-    signature = sign_message(message)
+    signature = sign_message(to_sign)
 
     # Verify the signature
-    verify_signature(tenant_name, message, signature)
+    verify_signature(tenant_name, to_sign, signature)
