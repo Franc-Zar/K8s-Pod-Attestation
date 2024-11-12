@@ -55,9 +55,9 @@ def verify_signature(name, message, signature):
     else:
         print('Signature verification failed:', response.text)
 
-#tenant_name = f'Tenant-{random.randint(0, 500)}'
+tenant_name = f'Tenant-{random.randint(0, 500)}'
 # Create a new tenant with the public key in PEM format
-#create_tenant(tenant_name, public_key)
+create_tenant(tenant_name, public_key)
 
 for i in range(0, 50):
     # Usage
@@ -85,7 +85,7 @@ for i in range(0, 50):
         ports:
         - containerPort: 6381
     '''
-    print(message)
+
     # Sign the YAML content (message)
     signature = sign_message(message)
 
