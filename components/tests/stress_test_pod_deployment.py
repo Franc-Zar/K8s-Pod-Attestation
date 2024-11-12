@@ -64,27 +64,27 @@ for i in range(0, 50):
     pod_name = f'redis-pod-{random.randint(0, 1000)}'
 
     message = f'''
-    apiVersion: v1
-    kind: Pod
-    metadata:
-    namespace: default
-    name: {pod_name}
-    labels:
-        app: redis
-    spec:
-    nodeName: worker  # Specify the node where you want to deploy the pod
-    containers:
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: default
+  name: {pod_name}
+  labels:
+    app: redis
+spec:
+  nodeName: worker  # Specify the node where you want to deploy the pod
+  containers:
     - name: redis1
-        image: redis:latest
-        command: ["redis-server", "--port", "6380"]  # Override the default port
-        ports:
+      image: redis:latest
+      command: ["redis-server", "--port", "6380"]  # Override the default port
+      ports:
         - containerPort: 6380
     - name: redis2
-        image: redis:latest
-        command: ["redis-server", "--port", "6381"]  # Override the second Redis container's port
-        ports:
+      image: redis:latest
+      command: ["redis-server", "--port", "6381"]  # Override the second Redis container's port
+      ports:
         - containerPort: 6381
-    '''
+'''
     to_sign = message
 
     # Sign the YAML content (message)
