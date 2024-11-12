@@ -128,6 +128,9 @@ var (
 	agentServicePortAllocation   int32 = 9090
 	agentNodePortAllocation      int32 = 31000
 	verifierPublicKey            string
+	IMAMountPath                 string
+	IMAMeasurementLogPath        string
+	TPMPath                      string
 )
 
 // initializeColors sets up color variables for console output.
@@ -145,6 +148,9 @@ func loadEnvironmentVariables() {
 	whitelistHOST = getEnv("WHITELIST_HOST", "localhost")
 	whitelistPORT = getEnv("WHITELIST_PORT", "9090")
 	verifierPublicKey = getEnv("VERIFIER_PUBLIC_KEY", "")
+	IMAMountPath = getEnv("IMA_MOUNT_PATH", "/root/ascii_runtime_measurements")
+	IMAMeasurementLogPath = getEnv("IMA_ML_PATH", "/sys/kernel/security/integrity/ima/ascii_runtime_measurements")
+	TPMPath = getEnv("TPM_PATH", "/dev/tpm0")
 
 	// setting namespaces allowed for attestation: only pods deployed within them can be attested
 	err := json.Unmarshal([]byte(attestationNamespaces), &attestationEnabledNamespaces)
@@ -198,7 +204,7 @@ func getWorkerInternalIP(newWorker *corev1.Node) (string, error) {
 		}
 	}
 	if workerIP == "" {
-		return "", fmt.Errorf("no internal IP found for node: %s", newWorker.GetName())
+		return "", fmt.Errorf("no internal IP found for Node: %s", newWorker.GetName())
 	}
 	return workerIP, nil
 }
@@ -212,7 +218,7 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 
 	agentHOST, err := getWorkerInternalIP(newWorker)
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Failed to deploy Agent on Worker node: %s: Node has no internal IP\n", time.Now().Format("02-01-2006 15:04:05"), newWorker.GetName()))
+		fmt.Printf(red.Sprintf("[%s] Failed to deploy Agent on Worker Node '%s': Node has no internal IP\n", time.Now().Format("02-01-2006 15:04:05"), newWorker.GetName()))
 		return false, "", ""
 	}
 	// allocating ports for this agent deployment
@@ -245,14 +251,14 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 							Image: "franczar/k8s-attestation-agent:latest",
 							Env: []corev1.EnvVar{
 								{Name: "AGENT_PORT", Value: "8080"},
-								{Name: "TPM_PATH", Value: "/dev/tpm0"},
+								{Name: "TPM_PATH", Value: TPMPath},
 							},
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: 8080},
 							},
 							VolumeMounts: []corev1.VolumeMount{
-								{Name: "tpm-device", MountPath: "/dev/tpm0"},
-								{Name: "ima-measurements", MountPath: "/root/ascii_runtime_measurements", ReadOnly: true},
+								{Name: "tpm-device", MountPath: TPMPath},
+								{Name: "ima-measurements", MountPath: IMAMountPath, ReadOnly: true},
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
@@ -264,7 +270,7 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 							Name: "tpm-device",
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/dev/tpm0",
+									Path: TPMPath,
 									Type: &charDeviceType,
 								},
 							},
@@ -273,7 +279,7 @@ func deployAgent(newWorker *corev1.Node) (bool, string, string) {
 							Name: "ima-measurements",
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/sys/kernel/security/integrity/ima/ascii_runtime_measurements",
+									Path: IMAMeasurementLogPath,
 									Type: &pathFileType,
 								},
 							},
@@ -396,24 +402,24 @@ func handleNodeEvent(event watch.Event, node *corev1.Node) {
 	switch event.Type {
 	case watch.Added:
 		if !nodeIsControlPlane(node) && !nodeIsRegistered(node.Name) {
-			fmt.Printf(green.Sprintf("[%s] Worker node '%s' joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+			fmt.Printf(green.Sprintf("[%s] Worker Node '%s' joined the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 
 			isAgentDeployed, agentHOST, agentPORT := deployAgent(node)
 			if !isAgentDeployed || !createAgentCRDInstance(node.Name) || !workerRegistration(node, agentHOST, agentPORT) {
 				err := deleteNodeFromCluster(node.Name)
 				if err != nil {
-					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker node '%s' from the cluster: %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
+					fmt.Printf(red.Sprintf("[%s] Failed to delete Worker Node '%s' from the cluster: %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
 				}
 			}
 		}
 
 	case watch.Deleted:
 		if !nodeIsControlPlane(node) {
-			fmt.Printf(yellow.Sprintf("[%s] Worker node '%s' deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
+			fmt.Printf(yellow.Sprintf("[%s] Worker Node '%s' deleted from the cluster\n", time.Now().Format("02-01-2006 15:04:05"), node.Name))
 
 			err := deleteAgent(node.Name)
 			if err != nil {
-				fmt.Printf(red.Sprintf("[%s] Failed to delete Agent deployed on Worker node '%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
+				fmt.Printf(red.Sprintf("[%s] Failed to delete Agent deployed on Worker Node '%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), node.Name, err))
 			}
 
 			err = deleteAgentCRDInstance(node.Name)
@@ -440,7 +446,7 @@ func deleteAgent(removedWorkerName string) error {
 		fmt.Printf(red.Sprintf("[%s] Failed to delete Agent service: %v\n", time.Now().Format("02-01-2006 15:04:05"), err))
 		return fmt.Errorf("Failed to delete Agent service: %v", err)
 	}
-	fmt.Printf(green.Sprintf("[%s] Agent Service '%s' successfully deleted\n", time.Now().Format("02-01-2006 15:04:05"), serviceName))
+	fmt.Printf(yellow.Sprintf("[%s] Agent Service '%s' successfully deleted\n", time.Now().Format("02-01-2006 15:04:05"), serviceName))
 
 	// Delete the Deployment
 	err = clientset.AppsV1().Deployments("attestation-system").Delete(context.TODO(), deploymentName, metav1.DeleteOptions{})
@@ -801,7 +807,7 @@ func workerRegistration(newWorker *corev1.Node, agentHOST, agentPORT string) boo
 		return false
 	}
 
-	fmt.Printf(green.Sprintf("[%s] Successfully registered Worker Node: %s\n", time.Now().Format("02-01-2006 15:04:05"), createWorkerResponse.WorkerId))
+	fmt.Printf(green.Sprintf("[%s] Successfully registered Worker Node '%s': %s\n", time.Now().Format("02-01-2006 15:04:05"), newWorker.GetName(), createWorkerResponse.WorkerId))
 	return true
 }
 
@@ -1140,7 +1146,7 @@ func createAgentCRDInstance(nodeName string) bool {
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 	})
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error getting pods on node %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
+		fmt.Printf(red.Sprintf("[%s] Error getting pods on Node '%s': %v\n", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
 		return false
 	}
 
@@ -1203,7 +1209,7 @@ func createAgentCRDInstance(nodeName string) bool {
 		return false
 	}
 
-	fmt.Printf(green.Sprintf("[%s] Agent CRD instance created for node %s\n", time.Now().Format("02-01-2006 15:04:05"), nodeName))
+	fmt.Printf(green.Sprintf("[%s] Agent CRD instance created for Node '%s'\n", time.Now().Format("02-01-2006 15:04:05"), nodeName))
 	return true
 }
 

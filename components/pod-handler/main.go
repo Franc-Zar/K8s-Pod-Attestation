@@ -155,12 +155,8 @@ func verifyTenantSignature(tenantName, message, signature string) (bool, error) 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("Registrar API returned status: %v", resp.Status)
-	}
-
 	var registrarResp RegistrarResponse
-	if err := json.NewDecoder(resp.Body).Decode(&registrarResp); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&registrarResp); err != nil {
 		return false, err
 	}
 

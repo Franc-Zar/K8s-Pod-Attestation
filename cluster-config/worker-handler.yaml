@@ -67,6 +67,12 @@ spec:
               value: "192.168.0.103"
             - name: WHITELIST_PORT
               value: "30002"
+            - name: IMA_MOUNT_PATH
+              value: "/root/ascii_runtime_measurements"
+            - name: IMA_ML_PATH
+              value: "/sys/kernel/security/integrity/ima/ascii_runtime_measurements"
+            - name: TPM_PATH
+              value: "/dev/tpm0"
             - name: VERIFIER_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:

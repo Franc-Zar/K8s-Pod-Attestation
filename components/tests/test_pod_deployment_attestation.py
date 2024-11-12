@@ -63,6 +63,7 @@ def pod_attestation(name, podName, signature):
         'podName': podName,  # Send the entire YAML content as the message
         'signature': signature
     }
+    print(data)
     response = requests.post(POD_ATTEST_URL, headers=headers, data=json.dumps(data))
     if response.status_code == 201:
         print('Pod attestation request sent')

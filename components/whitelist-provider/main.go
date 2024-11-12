@@ -134,7 +134,7 @@ func appendToWorkerWhitelist(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "OS whitelist added successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "OS whitelist added successfully"})
 	return
 }
 
@@ -260,7 +260,7 @@ func appendToContainerRuntimeWhitelist(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Container Runtime whitelist added successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Container Runtime whitelist added successfully"})
 	return
 }
 
@@ -351,7 +351,7 @@ func dropContainerRuntimeWhitelist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to drop Container Runtime whitelist"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Container Runtime whitelist dropped successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Container Runtime whitelist dropped successfully"})
 	return
 }
 
@@ -363,7 +363,7 @@ func dropPodWhitelist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to drop Pod whitelist"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Pod whitelist dropped successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Pod whitelist dropped successfully"})
 	return
 }
 
@@ -427,7 +427,7 @@ func appendFilesToExistingImageWhitelistByImageName(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Files added to Pod image: " + appendRequest.ImageName + " whitelist successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Files added to Pod image: " + appendRequest.ImageName + " whitelist successfully"})
 }
 
 // checkPodWhitelist verifies if the given pod's files match the stored whitelist for the pod's image.
