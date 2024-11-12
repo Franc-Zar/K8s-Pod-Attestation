@@ -169,14 +169,14 @@ func deleteAllPodsFromNode(nodeName string) {
 		fmt.Printf(yellow.Sprintf("[%s] Deleted pod %s from untrusted node %s\n", time.Now().Format("02-01-2006 15:04:05"), pod.Name, nodeName))
 	}
 
-	fmt.Printf(yellow.Sprintf("[%s] Deleted all pods from untrusted node %s", time.Now().Format("02-01-2006 15:04:05"), nodeName))
+	fmt.Printf(yellow.Sprintf("[%s] Deleted all pods from untrusted node %s\n", time.Now().Format("02-01-2006 15:04:05"), nodeName))
 }
 
 func deleteNode(nodeName string) {
 	// Delete the node
 	err := clientset.CoreV1().Nodes().Delete(context.TODO(), nodeName, metav1.DeleteOptions{})
 	if err != nil {
-		fmt.Printf(red.Sprintf("[%s] Error deleting Node %s: %v", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
+		fmt.Printf(red.Sprintf("[%s] Error deleting Node %s: %v\n", time.Now().Format("02-01-2006 15:04:05"), nodeName, err))
 		return
 	}
 
