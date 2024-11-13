@@ -95,14 +95,14 @@ worker_data_to_append = {
 
 store_pod_data = {
     "imageName": "redis:latest",
-    "imageDigest": "docker.io/library/redis@sha256:a06cea905344470eb49c972f3d030e22f28f632c1b4f43bbe4a26a4329dd6be5",
+    "imageDigest": "docker.io/library/redis@sha256:5fba7fb1c811b1cd452544cad5b161116d4da7bad9dece1802ea87787c0b8963",
     "validFiles": [
         {
             "filePath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
             "validDigests": {
                 "sha1": [],
                 "sha256": [
-                    "88024463c275711c29f6ac2920a5d3174349d8802720e2df1656637c18d8efba"
+                    "666bb96697d92290e2172a8403040f9e3ebdd06aa4d4769080649c92201a9aad"
                 ]
             }
         },
@@ -156,7 +156,7 @@ store_pod_data = {
             "validDigests": {
                 "sha1": [],
                 "sha256": [
-                    "6d8337d3d1648ed3f42eccdc90044505bd19b042c496d05c4c4cd3dfdddd9b24"
+                    "7288c75488697bad29619f7ad123b8e467744f500369689d97de13197d282e87"
                 ]
             }
         },
@@ -165,7 +165,7 @@ store_pod_data = {
             "validDigests": {
                 "sha1": [],
                 "sha256": [
-                    "4d351715e334aa32eebeb2f03f376e5c961a47f73b37f36885c281ce6e24bb57"
+                    "0122e231f5a44c94d889f9ae6cafc8a3825f03587304e79041af21eeeadeeb5a"
                 ]
             }
         },
@@ -183,7 +183,7 @@ store_pod_data = {
             "validDigests": {
                 "sha1": [],
                 "sha256": [
-                    "6a4bf24ed035ca81c3b339d67953d942261af2156a01753601c5b05c30f0b72c"
+                    "a78de995bfd4129643b7939bb79c2ddcc764d39b8a40050b21dcc1ec8f00279f"
                 ]
             }
         },
@@ -219,7 +219,7 @@ store_pod_data = {
             "validDigests": {
                 "sha1": [],
                 "sha256": [
-                    "4d13ab2d0a566eaeefbd493fffc3eca25fad9be4136c2796958906fa9c63d0f2"
+                    "93b58397fb163b27e33bd4c4093ce0d9556f45913560ed32676bdfeafb57155e"
                 ]
             }
         }
