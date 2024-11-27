@@ -23,7 +23,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strings"
+	"sync"
 )
 
 type RegistrationAcknowledge struct {
@@ -85,6 +85,7 @@ var (
 	rwc       io.ReadWriteCloser
 	AIKHandle tpmutil.Handle
 	EKHandle  tpmutil.Handle
+	TPMmtx    sync.Mutex
 )
 
 func openTPM() {
@@ -129,20 +130,11 @@ func initializeColors() {
 	yellow = color.New(color.FgYellow)
 }
 
-func getWorkerPublicAIK() (crypto.PublicKey, error) {
-	if AIKHandle.HandleValue() == 0 {
-		return nil, fmt.Errorf("AIK is not already created")
-	}
-
-	retrievedAK, err := client.NewCachedKey(rwc, tpm2legacy.HandleOwner, client.AKTemplateRSA(), AIKHandle)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to retrieve AIK from TPM")
-	}
-	return retrievedAK.PublicKey(), nil
-}
-
 // Mock function to get EK (Endorsement Key)
 func getWorkerEKandCertificate() (crypto.PublicKey, string) {
+	TPMmtx.Lock()
+	defer TPMmtx.Unlock()
+
 	EK, err := client.EndorsementKeyRSA(rwc)
 	if err != nil {
 		log.Fatalf("ERROR: could not get EndorsementKeyRSA: %v", err)
@@ -172,6 +164,9 @@ func getWorkerEKandCertificate() (crypto.PublicKey, string) {
 
 // Function to create a new AIK (Attestation Identity Key) for the Agent
 func createWorkerAIK() (string, string) {
+	TPMmtx.Lock()
+	defer TPMmtx.Unlock()
+
 	AIK, err := client.AttestationKeyRSA(rwc)
 	if err != nil {
 		log.Fatalf("ERROR: could not get AttestationKeyRSA: %v", err)
@@ -196,32 +191,6 @@ func createWorkerAIK() (string, string) {
 
 	// Return AIK material
 	return encodedNameData, encodedPublicArea
-}
-
-// extract AIKDigest and ephemeral Key from received challenge
-func extractChallengeElements(challenge string) (string, []byte, []byte, error) {
-	var err error
-	challengeElements := strings.Split(challenge, "::")
-	if len(challengeElements) != 3 {
-		return "", nil, nil, fmt.Errorf("malformed challenge: %v", err)
-	}
-
-	AIKDigest := challengeElements[0]
-	_, err = hex.DecodeString(AIKDigest)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to decode AIKDigest as hexadecimal: %v", err)
-	}
-
-	ephemeralKey, err := base64.StdEncoding.DecodeString(challengeElements[1])
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to decode ephemeral Key: %v", err)
-	}
-
-	nonce, err := hex.DecodeString(challengeElements[2])
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to decode nonce: %v", err)
-	}
-	return AIKDigest, ephemeralKey, nonce, nil
 }
 
 // Helper function to encode the public key to PEM format (for printing)
@@ -295,6 +264,9 @@ func verifySignature(publicKeyPEM string, message string, signature string) erro
 
 // Utility function: Sign a message using the provided private key
 func signWithAIK(message []byte) (string, error) {
+	TPMmtx.Lock()
+	defer TPMmtx.Unlock()
+
 	if AIKHandle.HandleValue() == 0 {
 		return "", fmt.Errorf("AIK is not already created")
 	}
@@ -481,6 +453,9 @@ func containsAndReturnPCR(PCRstoQuote []int, bootReservedPCRs []int) (bool, []in
 }
 
 func quoteGeneralPurposePCRs(nonce []byte, PCRsToQuote []int) (string, error) {
+	TPMmtx.Lock()
+	defer TPMmtx.Unlock()
+
 	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	// Custom function to return both found status and the PCR value
 	PCRsContainsBootReserved, foundPCR := containsAndReturnPCR(PCRsToQuote, bootReservedPCRs)
@@ -510,6 +485,9 @@ func quoteGeneralPurposePCRs(nonce []byte, PCRsToQuote []int) (string, error) {
 }
 
 func quoteBootAggregate(nonce []byte) (string, error) {
+	TPMmtx.Lock()
+	defer TPMmtx.Unlock()
+
 	bootReservedPCRs := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 	bootPCRs := tpm2legacy.PCRSelection{
@@ -534,6 +512,8 @@ func quoteBootAggregate(nonce []byte) (string, error) {
 }
 
 func activateAIKCredential(AIKCredential, AIKEncryptedSecret string) ([]byte, error) {
+	TPMmtx.Lock()
+	defer TPMmtx.Unlock()
 	decodedCredential, err := base64.StdEncoding.DecodeString(AIKCredential)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to decode AIK Credential")

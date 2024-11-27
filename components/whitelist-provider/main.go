@@ -207,7 +207,7 @@ func dropWorkerWhitelist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Failed to drop Worker whitelist"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Worker whitelist dropped successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Worker whitelist dropped successfully"})
 	return
 }
 
@@ -320,7 +320,7 @@ func checkContainerRuntimeWhitelist(c *gin.Context) {
 	return
 }
 
-// deleteFromContainerRuntimeWhitelist deletes a worker whitelist record based on the provided containerRuntimeName.
+// deleteFromContainerRuntimeWhitelist deletes a container runtime whitelist record based on the provided containerRuntimeName.
 func deleteFromContainerRuntimeWhitelist(c *gin.Context) {
 	containerRuntimeName, err := url.QueryUnescape(c.Query("containerRuntimeName"))
 	if err != nil {
@@ -427,7 +427,7 @@ func appendFilesToExistingImageWhitelistByImageName(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Files added to Pod image: " + appendRequest.ImageName + " whitelist successfully"})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Files added to Pod image whitelist successfully"})
 }
 
 // checkPodWhitelist verifies if the given pod's files match the stored whitelist for the pod's image.

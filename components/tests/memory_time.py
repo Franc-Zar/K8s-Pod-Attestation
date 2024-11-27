@@ -285,7 +285,7 @@ num_snapshots = len(cpu_kubernetes_sum)
 elapsed_time = np.arange(0, num_snapshots * 0.1, 0.1)  # in seconds
 
 # Create the plot for CPU usage
-fig, ax1 = plt.subplots(figsize=(18, 10))
+fig, ax1 = plt.subplots(figsize=(10, 6))
 ax1.plot(elapsed_time, cpu_kubernetes_sum, label="Kubernetes CPU Usage (%)", color="blue", marker="o")
 ax1.set_xlabel("Elapsed Time (s)")
 ax1.set_ylabel("CPU Usage (%)")
@@ -298,7 +298,7 @@ plt.savefig("kubernetes_cpu_usage.pdf")
 plt.show()
 
 # Create the plot for Memory usage
-fig, ax2 = plt.subplots(figsize=(18, 10))
+fig, ax2 = plt.subplots(figsize=(10, 6))
 ax2.plot(elapsed_time, mem_kubernetes_sum, label="Kubernetes Memory Usage (%)", color="green", marker="o")
 ax2.set_xlabel("Elapsed Time (s)")
 ax2.set_ylabel("Memory Usage (%)")

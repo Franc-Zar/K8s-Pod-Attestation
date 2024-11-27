@@ -561,7 +561,7 @@ func deleteTenant(workerName string) error {
 func deleteTenantByName(c *gin.Context) {
 	tenantName := c.Query("name")
 	if tenantName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "tenant name is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"message": "tenant name is required", "status": "error"})
 		return
 	}
 
@@ -576,7 +576,7 @@ func deleteTenantByName(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Tenant deleted successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "Tenant deleted successfully", "status": "success"})
 }
 
 // Worker functions
@@ -767,7 +767,7 @@ func deleteWorker(workerName string) error {
 func deleteWorkerByName(c *gin.Context) {
 	workerName := c.Query("name")
 	if workerName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "worker name is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"message": "worker name is required", "status": "error"})
 		return
 	}
 
@@ -778,11 +778,11 @@ func deleteWorkerByName(c *gin.Context) {
 	// Call a function to delete the worker from your data store or Kubernetes
 	err := deleteWorker(workerName)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error(), "status": "error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Worker deleted successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "Worker deleted successfully", "status": "success"})
 }
 
 // initializeDatabase sets up the database and creates necessary tables if they don't exist.

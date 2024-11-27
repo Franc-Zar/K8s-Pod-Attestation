@@ -2,6 +2,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 from datetime import datetime, timedelta
+from matplotlib import rcParams
+
+rcParams['font.weight'] = 'bold'
 
 kubernetes_join = """
 2024-11-12 16:01:11.496, kube-apiserver, 4.2, 2.6
@@ -308,8 +311,8 @@ reg_times, reg_cpu, reg_memory = aggregate_data(registration_data)
 plt.figure(figsize=(9, 5))
 plt.plot(join_times, join_cpu, label='Kubernetes Join', color='b', marker='o')
 plt.plot(reg_times, reg_cpu, label='Worker Registration', color='r', marker="^")
-plt.xlabel('Time (s)')
-plt.ylabel('CPU Usage (%)')
+plt.xlabel('Time (s)', weight='bold')
+plt.ylabel('CPU Usage (%)', weight='bold')
 plt.legend()
 plt.xticks(np.arange(0, 13, 1))
 plt.yticks(np.arange(8.75, 10, 0.25))
@@ -321,8 +324,8 @@ plt.savefig('registration_cpu_comparison.pdf')
 plt.figure(figsize=(9, 5))
 plt.plot(join_times, join_memory, label='Kubernetes Join', color='b', marker='o')
 plt.plot(reg_times, reg_memory, label='Worker Registration', color='r', marker="^")
-plt.xlabel('Time (s)')
-plt.ylabel('Memory Usage (%)')
+plt.xlabel('Time (s)', weight='bold')
+plt.ylabel('Memory Usage (%)', weight='bold')
 plt.legend()
 plt.xticks(np.arange(0, 13, 1))
 plt.yticks(np.arange(5, 7, 0.25))
